@@ -1,0 +1,7 @@
+result
+result-*
+.direnv
+.DS_Store
+.opencode/
+*.img
+*.img.zst
