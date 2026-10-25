@@ -596,10 +596,11 @@ This extraction has been checked in several ways:
   and a `config.txt` with `kernel=u-boot.bin` and `arm_64bit=1`; the ext4 partition contains
   `extlinux.conf` pointing at the vendor `linux-rpi` kernel and initrd (6.18.50 at
   extraction time).
-- A throwaway copy of `nix-homelab-hosts` was migrated using the steps in this README. All
-  three configurations (`rpi5-8gb`, `rpi5-4gb`, `rpi5-bootstrap`) evaluate, and the resulting
-  `fileSystems`, normalized disko disks, kernel, firmware, fstrim/scrub/snapper settings,
-  installer `sdImage`, SSH settings, and `variant_id` match the pre-extraction configuration.
+- `nix-homelab-hosts` was migrated on branch `pi5-extract` using the steps in this README.
+  All three configurations (`rpi5-8gb`, `rpi5-4gb`, `rpi5-bootstrap`) evaluate and
+  `nix flake check` passes; the resulting `fileSystems`, normalized disko disks, kernel,
+  firmware, fstrim/scrub/snapper settings, installer `sdImage`, SSH settings, and
+  `variant_id` match the pre-extraction configuration (only bind-mount ordering differs).
 - The consumer API was tested with `inputs.pi5.nixosModules.default`,
   `inputs.pi5.nixosModules.<granular>`, and `inputs.pi5.lib.mkPi5Installer`, including
   `inputs.pi5.inputs.nixpkgs.follows = "nixpkgs"`.
