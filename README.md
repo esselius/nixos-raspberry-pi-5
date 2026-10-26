@@ -7,6 +7,18 @@ Reusable NixOS modules and an imaging/provisioning CLI for bringing a Raspberry 
 - an ephemeral btrfs root on NVMe (impermanence),
 - a one-shot bootstrap installer image for `nixos-anywhere`, without kexec.
 
+```mermaid
+flowchart LR
+    cli["pi5-image CLI"] -->|build| img["Bootstrap SD image<br/>no kexec"]
+    img -->|flash| inst["Installer boots on Pi"]
+```
+```mermaid
+flowchart LR
+    sd["microSD<br/>firmware + U-Boot + extlinux"] --> kern["Vendor kernel + initrd"]
+    kern --> nvme["NVMe btrfs<br/>@root · @nix · @persist"]
+    nvme --> cfg["Impermanence<br/>root wipe + persisted paths"]
+```
+
 This is the Pi 5 + NVMe + boot/storage layer extracted from
 [`esselius/nix-homelab-hosts`](https://github.com/esselius/nix-homelab-hosts), where the
 same design has been exercised on real 4 GB and 8 GB boards. The application layer
