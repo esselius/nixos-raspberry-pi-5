@@ -247,49 +247,9 @@ in
             TimeoutStartSec = "120s";
           };
           script = ''
-            set -eux
-            for _ in $(seq 1 200); do
-              [ -e ${lib.escapeShellArg cfg.rootDevice} ] && break
-              sleep 0.05
-            done
-            udevadm settle --timeout=10 || true
-
-            mkdir -p /btrfs_tmp
-            # subvol=/ is required: mounting the filesystem's default subvolume
-            # would make @root resolve inside that subvolume instead of the
-            # top level. disko's own btrfs code mounts the top level explicitly.
-            mount -o subvol=/,nodiscard ${lib.escapeShellArg cfg.rootDevice} /btrfs_tmp
-
-            target=${lib.escapeShellArg "/btrfs_tmp/${cfg.rootSubvolume}"}
-            children_file=/run/pi5-root-wipe-children.txt
-
-            if [ -e "$target" ]; then
-              btrfs property set "$target" ro false 2>/dev/null || true
-
-              # btrfs lists children parent-first, which is the wrong order for
-              # deletion. Repeat passes: each pass deletes the leaves that are
-              # currently deletable, until no more progress is made.
-              btrfs subvolume list -o "$target" > "$children_file"
-              while [ -s "$children_file" ]; do
-                removed=0
-                while read -r line; do
-                  subvolume="''${line#* path }"
-                  [ -n "$subvolume" ] || continue
-                  btrfs property set "/btrfs_tmp/$subvolume" ro false 2>/dev/null || true
-                  if btrfs subvolume delete "/btrfs_tmp/$subvolume"; then
-                    removed=1
-                  fi
-                done < "$children_file"
-                [ "$removed" -eq 1 ] || break
-                btrfs subvolume list -o "$target" > "$children_file"
-              done
-
-              btrfs subvolume delete "$target"
-            fi
-            btrfs subvolume create "$target"
-
-            umount /btrfs_tmp
-            rmdir /btrfs_tmp
+            root_device=${lib.escapeShellArg cfg.rootDevice}
+            root_subvolume=${lib.escapeShellArg cfg.rootSubvolume}
+            ${builtins.readFile ./scripts/root-wipe.sh}
           '';
         };
       })
@@ -365,31 +325,39 @@ in
               '';
             }
           ]
-          ++ lib.optional (lib.hasAttr cfg.persistPath config.fileSystems) {
-            assertion = config.fileSystems.${cfg.persistPath}.fsType == "btrfs";
+          ++ lib.optional (hasNvme && cfg.resetRoot) {
+            assertion = lib.attrByPath [ "@nix" ] null nvme.subvolumes == "/nix";
             message = ''
-              pi5.impermanence.persistPath ("${cfg.persistPath}") must be a btrfs
-              filesystem, because root-wipe/snapper operate on btrfs.
+              pi5.nvme.subvolumes must map "@nix" to "/nix" when resetRoot is
+              enabled; the per-boot root reset would otherwise delete the Nix
+              store.
             '';
           }
-          ++
-            lib.optional
-              (cfg.snapshots.enable && snapshotsMount != null && lib.hasAttr snapshotsMount config.fileSystems)
-              {
-                assertion = config.fileSystems.${snapshotsMount}.fsType == "btrfs";
-                message = ''
-                  pi5.impermanence.snapshots mount ("${toString snapshotsMount}")
-                  must be a btrfs filesystem.
-                '';
-              }
-          ++ lib.optional cfg.snapshots.enable {
-            assertion = snapshotsMount != null;
-            message = ''
-              pi5.impermanence.snapshots is enabled but pi5.nvme.subvolumes has no
-              "${cfg.snapshots.subvolume}" entry. Add the subvolume, set
-              pi5.impermanence.snapshots.mountPath, or disable snapshots.
-            '';
-          };
+          ++ [
+            {
+              assertion =
+                lib.hasAttr cfg.persistPath config.fileSystems
+                && config.fileSystems.${cfg.persistPath}.fsType == "btrfs";
+              message = ''
+                pi5.impermanence.persistPath ("${cfg.persistPath}") must be a declared
+                btrfs filesystem, because root-wipe/snapper operate on btrfs.
+              '';
+            }
+            {
+              assertion =
+                !cfg.snapshots.enable
+                || (
+                  snapshotsMount != null
+                  && lib.hasAttr snapshotsMount config.fileSystems
+                  && config.fileSystems.${snapshotsMount}.fsType == "btrfs"
+                );
+              message = ''
+                pi5.impermanence.snapshots is enabled but its mount
+                ("${toString snapshotsMount}") is not a declared btrfs filesystem.
+                Add the subvolume, set snapshots.mountPath, or disable snapshots.
+              '';
+            }
+          ];
       }
     ]
   );

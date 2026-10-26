@@ -138,6 +138,51 @@ is_compressed() {
   esac
 }
 
+image_size_bytes() {
+  local src=$1
+  if is_compressed "$src"; then
+    need zstd
+    zstd -lv "$src" 2>/dev/null \
+      | awk -F'[()]' '/Decompressed Size:/ { split($2, a, " "); if (a[1] ~ /^[0-9]+$/) { print a[1]; exit } }'
+  else
+    wc -c <"$src" | tr -d '[:space:]'
+  fi
+}
+
+device_size_bytes() {
+  local disk=$1
+  case "$(uname -s)" in
+    Darwin)
+      diskutil info -plist "$disk" 2>/dev/null | plutil -extract Size raw -o - - 2>/dev/null
+      ;;
+    Linux)
+      lsblk -bdno SIZE "$disk" 2>/dev/null
+      ;;
+  esac
+}
+
+check_image_fits() {
+  local src=$1 disk=$2 image_bytes device_bytes
+  image_bytes=$(image_size_bytes "$src" 2>/dev/null || true)
+  device_bytes=$(device_size_bytes "$disk" 2>/dev/null || true)
+
+  case "$image_bytes" in
+    '' | *[!0-9]*) image_bytes="" ;;
+  esac
+  case "$device_bytes" in
+    '' | *[!0-9]*) device_bytes="" ;;
+  esac
+
+  if [ -z "$image_bytes" ] || [ -z "$device_bytes" ]; then
+    log "warning: could not determine image/device size; skipping size preflight" >&2
+    return 0
+  fi
+  if [ "$image_bytes" -gt "$device_bytes" ]; then
+    die "image is $image_bytes bytes but $disk is only $device_bytes bytes"
+  fi
+  log "image $image_bytes bytes, target $device_bytes bytes"
+}
+
 nix_build_cmd() {
   local -a args=(
     nix
@@ -347,6 +392,7 @@ do_flash() {
     Darwin)
       disk=$(normalize_darwin_disk "$disk")
       bs=4M
+      check_image_fits "$src" "$disk"
       if [ "$dry_run" -eq 1 ]; then
         preview_flash "$src" "$disk" "$bs"
         return 0
@@ -358,6 +404,7 @@ do_flash() {
     Linux)
       disk=$(normalize_linux_disk "$disk")
       bs=4M
+      check_image_fits "$src" "$disk"
       if [ "$dry_run" -eq 1 ]; then
         preview_flash "$src" "$disk" "$bs"
         return 0

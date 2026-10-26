@@ -222,11 +222,52 @@
           drvs = map (c: c.config.system.build.toplevel) (builtins.attrValues self.nixosConfigurations) ++ [
             bootstrap.config.system.build.sdImage
           ];
+
+          mkAssertionConfig =
+            extra:
+            nixpkgs.lib.nixosSystem {
+              system = "aarch64-linux";
+              modules = [
+                self.nixosModules.default
+                {
+                  networking.hostName = "assertion-test";
+                  system.stateVersion = "26.05";
+                }
+                extra
+              ];
+            };
+          fails = config: !(builtins.tryEval config.config.system.build.toplevel.drvPath).success;
+          assertionsOk =
+            fails (mkAssertionConfig {
+              pi5.nvme.subvolumes = {
+                "@root" = "/";
+                "@persist" = "/persist";
+                "@snapshots" = "/snapshots";
+              };
+            })
+            && fails (mkAssertionConfig {
+              pi5.sdBoot.device = "/dev/nvme0n1";
+            })
+            && fails (mkAssertionConfig {
+              pi5.impermanence.persistPath = "/not-a-fs";
+            })
+            && !(fails (mkAssertionConfig { }));
         in
         {
           # Cross-system check that the CLI wrapper still builds (and passes
           # shellcheck) on this platform.
           pi5-image = self.packages.${system}.pi5-image;
+
+          # Negative tests for the assertions that prevent data loss.
+          assertions = pkgs.runCommand "assertions" { } (
+            if assertionsOk then
+              "touch $out"
+            else
+              ''
+                echo "pi5 assertion checks failed: a known-bad config evaluated or the good config did not" >&2
+                exit 1
+              ''
+          );
 
           eval-all = builtins.deepSeq (map (d: d.drvPath) drvs) (
             pkgs.runCommand "eval-all" { } ''
@@ -257,7 +298,7 @@
               }
               ''
                 cd "$src"
-                shellcheck scripts/*.sh
+                shellcheck modules/scripts/*.sh scripts/*.sh
                 touch $out
               '';
         }

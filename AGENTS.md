@@ -30,8 +30,9 @@ This repo is the reusable Raspberry Pi 5 + NVMe bring-up layer extracted from
   flaky Pi 5 kexec) and root SSH with keys (nixos-anywhere hardcodes root for
   installer targets).
 - Run `nix fmt` and `nix flake check` before committing. The checks cover
-  evaluation, formatting, shellcheck, and building the `pi5-image` wrapper; they
-  do not build the aarch64-linux SD image.
+  evaluation, negative assertion tests, formatting, shellcheck (including
+  `modules/scripts/root-wipe.sh`), and building the `pi5-image` wrapper; they do
+  not build the aarch64-linux SD image.
 - Build the image with an aarch64-linux builder when validating changes:
   `nix build .#images.pi5-bootstrap`.
 - Keep README "Hard-won details", the migration section, and the option tables

@@ -96,6 +96,9 @@ disposable installer medium and may be touched or rewritten during a hard reset.
 | `@persist` | `/persist` | Persists: `machine-id`, SSH host keys, `/var/lib/nixos`, `/var/log`, plus whatever you add |
 | `@snapshots` | `/snapshots` | snapper's snapshot store for `/persist` |
 
+The partition is a plain Linux filesystem; the GPT legacy-BIOS-bootable attribute is not set
+(it was unused because U-Boot boots from SD). Existing installs keep it until recreated.
+
 Mount options are `noatime,compress=zstd,nodiscard`; `services.fstrim` batches discards
 instead of paying write amplification on every freed block.
 
@@ -333,6 +336,8 @@ pi5-image provision --host HOST [--flake FLAKE] DISK TARGET
   aarch64-linux.
 - `--wipe-nvme /dev/nvme0n1` runs `blkdiscard` on the target before installing; use it after
   a previous ZFS pool. It only accepts NVMe device paths and refuses `/dev/mmcblk*`/`/dev/loop*`.
+- Before flashing, the decompressed image size is checked against the target device size; a
+  too-small card fails before `dd` starts.
 - `install`/`provision` verify that the target has `VARIANT_ID=installer` before running
   `nixos-anywhere`; `--allow-non-installer` bypasses the check.
 - `provision --no-wait` stops after flashing and leaves the install command for later.
@@ -599,7 +604,7 @@ call; only the `nixos-anywhere` invocation changes.
 
 ```bash
 nix develop
-nix flake check          # eval-all + fmt + shellcheck + CLI wrapper build
+nix flake check          # eval-all + assertions + fmt + shellcheck + CLI wrapper build
 nix fmt
 nix build .#pi5-image
 nix run .#pi5-image -- --help

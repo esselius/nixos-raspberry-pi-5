@@ -73,10 +73,6 @@ in
           type = "8300";
           size = "100%";
           label = cfg.partitionLabel;
-          # GPT attribute 2 is the legacy-BIOS-bootable bit. It is kept for
-          # parity with the layout verified on hardware; the Pi's U-Boot boots
-          # from the SD card, not this disk.
-          attributes = [ 2 ];
           content = {
             type = "btrfs";
             extraArgs = [ "-f" ];
