@@ -23,7 +23,12 @@ assume_yes=0
 dry_run=0
 force=0
 no_wait=0
+accept_flake_config=0
+allow_non_installer=0
+ssh_port=""
+ssh_options=()
 cleanup_file=""
+work_dir=""
 positional=()
 extra_args=()
 
@@ -64,14 +69,18 @@ Options:
   --mode MODE         mount (preserve NVMe and SD) or wipe (destroy/recreate NVMe; SD is disposable)
   --output FILE       build: decompressed image path (default: <installer>.img)
   --ssh-key FILE      SSH identity used by nixos-anywhere and the wait loop
+  --ssh-port PORT     SSH port for the target (default: nixos-anywhere's 22)
+  --ssh-option OPT    extra ssh -o option (repeatable)
   --build-on MODE     nixos-anywhere build location: auto, local, remote (default: auto)
   --wipe-nvme DEVICE  discard DEVICE on the target before installing (e.g. /dev/nvme0n1)
                       Needed after a previous ZFS pool left a stale label.
   --wait SECONDS      provision: how long to wait for SSH (default: 180)
-  --no-wait           provision: do not wait for the installer to boot
+  --no-wait           provision: stop after flashing; do not wait/install
+  --allow-non-installer  skip the VARIANT_ID=installer target check
+  --accept-flake-config  trust the target flake's nixConfig (substituters/keys)
   --yes, -y           skip confirmation prompts
   --dry-run, -n       print the commands instead of running them
-  --force, -f         build: overwrite an existing output file
+  --force, -f         build: overwrite output; flash: allow a loop test device
   --                  pass the remaining arguments to nixos-anywhere
   -h, --help          show this help
 
@@ -109,6 +118,9 @@ cleanup() {
   if [ -n "$cleanup_file" ]; then
     rm -f "$cleanup_file"
   fi
+  if [ -n "$work_dir" ]; then
+    rm -rf "$work_dir"
+  fi
 }
 trap cleanup EXIT
 
@@ -127,9 +139,17 @@ is_compressed() {
 }
 
 nix_build_cmd() {
-  nix --extra-experimental-features "nix-command flakes" build \
-    --no-link --print-out-paths --accept-flake-config \
-    "${flake}#nixosConfigurations.${installer}.config.system.build.sdImage"
+  local -a args=(
+    nix
+    --extra-experimental-features "nix-command flakes"
+    build
+    --out-link "$work_dir/result"
+  )
+  if [ "$accept_flake_config" -eq 1 ]; then
+    args+=(--accept-flake-config)
+  fi
+  args+=("${flake}#nixosConfigurations.${installer}.config.system.build.sdImage")
+  "${args[@]}"
 }
 
 find_image() {
@@ -152,14 +172,10 @@ find_image() {
 
 build_image() {
   need nix
-  local out
-  if ! out=$(nix_build_cmd); then
+  if ! nix_build_cmd; then
     die "nix build failed. The SD image is an aarch64-linux derivation; on macOS configure an aarch64-linux builder or run the build on a Linux machine."
   fi
-  if [ -z "$out" ]; then
-    die "nix build produced no output path"
-  fi
-  find_image "$out"
+  find_image "$work_dir/result"
 }
 
 write_image_file() {
@@ -268,6 +284,21 @@ normalize_linux_disk() {
   real=$(readlink -f "$disk")
   target_name=$(basename "$real")
 
+  # A partition, LVM LV, RAID member, or loop device is not a flash target.
+  # Accept loop devices only with --force, for tests.
+  target_type=$(lsblk -dno TYPE "$real" 2>/dev/null || true)
+  case "$target_type" in
+    disk) ;;
+    loop)
+      if [ "$force" -ne 1 ]; then
+        die "refusing loop device $disk; use --force only for loop-based tests"
+      fi
+      ;;
+    *)
+      die "refusing $disk: lsblk type '${target_type:-unknown}' is not a whole disk"
+      ;;
+  esac
+
   root_src=$(awk '$2 == "/" { print $1; exit }' /proc/mounts)
   root_real=$(readlink -f "$root_src" 2>/dev/null || printf '%s' "$root_src")
   case "$root_real" in
@@ -315,7 +346,7 @@ do_flash() {
   case "$(uname -s)" in
     Darwin)
       disk=$(normalize_darwin_disk "$disk")
-      bs=4m
+      bs=4M
       if [ "$dry_run" -eq 1 ]; then
         preview_flash "$src" "$disk" "$bs"
         return 0
@@ -355,6 +386,12 @@ do_ssh() {
     -o UserKnownHostsFile=/dev/null
     -o StrictHostKeyChecking=no
   )
+  if [ -n "$ssh_port" ]; then
+    args+=(-p "$ssh_port")
+  fi
+  for opt in "${ssh_options[@]}"; do
+    args+=(-o "$opt")
+  done
   if [ -n "$ssh_key" ]; then
     args+=(-i "$ssh_key")
   fi
@@ -374,6 +411,15 @@ wait_for_ssh() {
   die "timed out after ${wait_seconds}s waiting for $target"
 }
 
+check_installer_target() {
+  if [ "$allow_non_installer" -eq 1 ]; then
+    return 0
+  fi
+  if ! do_ssh "$target" 'grep -q "^VARIANT_ID=installer" /etc/os-release' >/dev/null 2>&1; then
+    die "target $target is not the installer image (VARIANT_ID=installer); use --allow-non-installer to override"
+  fi
+}
+
 do_install() {
   local na=${NIXOS_ANYWHERE:-nixos-anywhere}
   local -a args=(--flake "${flake}#${host}" --build-on "$build_on")
@@ -383,16 +429,29 @@ do_install() {
   else
     args+=(--disko-mode disko)
   fi
+  if [ -n "$ssh_port" ]; then
+    args+=(-p "$ssh_port")
+  fi
+  for opt in "${ssh_options[@]}"; do
+    args+=(--ssh-option "$opt")
+  done
   if [ -n "$ssh_key" ]; then
     args+=(-i "$ssh_key")
   fi
   args+=("${extra_args[@]}" "$target")
 
   if [ -n "$wipe_nvme" ]; then
+    case "$wipe_nvme" in
+      /dev/mmcblk* | /dev/loop*)
+        die "refusing --wipe-nvme on SD/eMMC/loop device: $wipe_nvme"
+        ;;
+    esac
     log "discarding $wipe_nvme on $target before install"
     if [ "$dry_run" -eq 1 ]; then
       show ssh "$target" "sudo blkdiscard -f $wipe_nvme"
     else
+      do_ssh "$target" "test -b $(printf '%q' "$wipe_nvme")" \
+        || die "no such block device on $target: $wipe_nvme"
       do_ssh "$target" "sudo blkdiscard -f $(printf '%q' "$wipe_nvme")"
     fi
   fi
@@ -412,9 +471,7 @@ cmd_build() {
 
   local dest=${output:-${installer}.img}
   if [ "$dry_run" -eq 1 ]; then
-    show nix --extra-experimental-features "nix-command flakes" build \
-      --no-link --print-out-paths --accept-flake-config \
-      "${flake}#nixosConfigurations.${installer}.config.system.build.sdImage"
+    log "would build ${flake}#nixosConfigurations.${installer}.config.system.build.sdImage"
     log "would write the decompressed image to $dest"
     return 0
   fi
@@ -454,6 +511,7 @@ cmd_install() {
   fi
 
   if [ "$dry_run" -eq 0 ]; then
+    check_installer_target
     if [ "$mode" = "wipe" ]; then
       confirm "Install '$host' onto $target in wipe mode. The target NVMe will be destroyed; the SD card is disposable."
     else
@@ -480,12 +538,15 @@ cmd_provision() {
   fi
 
   if [ "$dry_run" -eq 1 ]; then
-    show nix --extra-experimental-features "nix-command flakes" build \
-      --no-link --print-out-paths --accept-flake-config \
-      "${flake}#nixosConfigurations.${installer}.config.system.build.sdImage"
-    log "would flash the resulting image to $disk"
-    log "would wait up to ${wait_seconds}s for $target (unless --no-wait)"
-    do_install
+    validate_disk "$disk"
+    log "would build ${flake}#nixosConfigurations.${installer}.config.system.build.sdImage"
+    preview_flash "/path/to/sd-image.img.zst" "$disk" "4M"
+    if [ "$no_wait" -eq 1 ]; then
+      log "would stop after flashing (--no-wait)"
+    else
+      log "would wait up to ${wait_seconds}s for $target"
+      do_install
+    fi
     return 0
   fi
 
@@ -497,9 +558,13 @@ cmd_provision() {
   do_flash "$image" "$disk"
   log "SD card written. Insert it into the Pi, connect the NVMe, and power on."
 
-  if [ "$no_wait" -eq 0 ]; then
-    wait_for_ssh
+  if [ "$no_wait" -eq 1 ]; then
+    log "not waiting for the target (--no-wait); run pi5-image install when it is reachable"
+    return 0
   fi
+
+  wait_for_ssh
+  check_installer_target
   do_install
 }
 
@@ -551,6 +616,24 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || die "--ssh-key requires a value"
       ssh_key=$2
       shift 2
+      ;;
+    --ssh-port)
+      [ "$#" -ge 2 ] || die "--ssh-port requires a value"
+      ssh_port=$2
+      shift 2
+      ;;
+    --ssh-option)
+      [ "$#" -ge 2 ] || die "--ssh-option requires a value"
+      ssh_options+=("$2")
+      shift 2
+      ;;
+    --accept-flake-config)
+      accept_flake_config=1
+      shift
+      ;;
+    --allow-non-installer)
+      allow_non_installer=1
+      shift
       ;;
     --build-on)
       [ "$#" -ge 2 ] || die "--build-on requires a value"
@@ -618,6 +701,15 @@ if [ -n "$ssh_key" ] && [ ! -f "$ssh_key" ]; then
   die "SSH key not found: $ssh_key"
 fi
 
+if [ -n "$ssh_port" ]; then
+  case "$ssh_port" in
+    '' | *[!0-9]*) die "--ssh-port must be an integer (got: $ssh_port)" ;;
+  esac
+  if [ "$ssh_port" -lt 1 ] || [ "$ssh_port" -gt 65535 ]; then
+    die "--ssh-port must be between 1 and 65535 (got: $ssh_port)"
+  fi
+fi
+
 if [ -z "$installer" ]; then
   die "--installer must not be empty"
 fi
@@ -625,6 +717,9 @@ fi
 if [ "$command" != "build" ] && [ -n "$output" ]; then
   die "--output is only supported by build"
 fi
+
+work_dir=$(mktemp -d "${TMPDIR:-/tmp}/pi5-image.XXXXXX") \
+  || die "cannot create a temporary directory"
 
 case "$command" in
   build) cmd_build ;;

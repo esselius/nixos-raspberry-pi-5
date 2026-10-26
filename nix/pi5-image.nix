@@ -6,6 +6,10 @@
   zstd,
   openssh,
   util-linux,
+  coreutils,
+  gawk,
+  gnused,
+  gnugrep,
 }:
 writeShellApplication {
   name = "pi5-image";

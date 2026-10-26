@@ -113,7 +113,13 @@ in
       firmwareSize = cfg.firmwareSize;
       rootVolumeLabel = cfg.rootVolumeLabel;
       preBuildCommands = lib.mkDefault ''
-        chmod u+w "$root_fs" || true
+        # With sdImage.compressImage = true, root_fs is a writable decompressed
+        # copy. With compressImage = false it is a read-only store path, so copy
+        # it first (the pattern from nixpkgs' sd-image.nix docs).
+        if [ ! -w "$root_fs" ]; then
+          cp --no-preserve=mode "$root_fs" ./root-fs.img
+          root_fs=./root-fs.img
+        fi
         resize2fs "$root_fs" ${cfg.rootFilesystemSize}
       '';
     };
@@ -141,7 +147,9 @@ in
     users.users.${cfg.adminUser} = {
       isNormalUser = lib.mkDefault true;
       description = lib.mkDefault "NixOS installer admin";
-      extraGroups = [ "wheel" ];
+      # mkDefault so a project module (e.g. ssh-access.nix) that also adds
+      # wheel wins instead of producing a duplicate group.
+      extraGroups = lib.mkDefault [ "wheel" ];
       openssh.authorizedKeys.keys = cfg.sshAuthorizedKeys;
     };
 

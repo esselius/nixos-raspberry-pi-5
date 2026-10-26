@@ -24,8 +24,9 @@
     description = "admin";
     extraGroups = [ "wheel" ];
     openssh.authorizedKeys.keys = [
-      # Example only: replace with your own public key.
-      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFMdasDSm/XlOpv15asMENnQ/E9W9rXExBcUAVd/G6Mo"
+      # Test-only key; the private half was discarded, so this example host is
+      # intentionally unreachable. Replace it with your own public key.
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPVIgmsKXn3UwSmCQ7r0GnIKQ9rxh14VzYm4gtUHhaWi pi5-demo-test-only-no-private-key-retained"
     ];
   };
 }

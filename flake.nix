@@ -38,10 +38,11 @@
 
       perSystem = f: nixpkgs.lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
 
-      # Public key used by the example host and the demo bootstrap image. This is
-      # the author's key, copied from the project this was extracted from;
-      # replace it with your own in your flake.
-      exampleSshKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFMdasDSm/XlOpv15asMENnQ/E9W9rXExBcUAVd/G6Mo";
+      # Public key used only by the demo host and demo bootstrap output. The
+      # private half was discarded; nobody can log in with this image. Replace
+      # it with your own key in your flake. Real installer configs should pass
+      # their own sshAuthorizedKeys (or import an SSH module).
+      exampleSshKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPVIgmsKXn3UwSmCQ7r0GnIKQ9rxh14VzYm4gtUHhaWi pi5-demo-test-only-no-private-key-retained";
 
       bootstrap = self.lib.mkPi5Installer {
         sshAuthorizedKeys = [ exampleSshKey ];

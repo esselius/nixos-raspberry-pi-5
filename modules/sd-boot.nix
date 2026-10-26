@@ -17,25 +17,22 @@ in
       '';
     };
 
-    bootMount = lib.mkOption {
+    firmwareLabel = lib.mkOption {
       type = lib.types.str;
-      default = "/boot";
+      default = "FIRMWARE";
       description = ''
-        Mount point of the ext4 partition that holds extlinux.conf, kernels,
-        and initrds. This is the partition U-Boot reads.
-
-        NixOS' generic-extlinux-compatible bootloader expects `/boot`; change
-        this only if you also move the bootloader's mount point.
+        Filesystem label of the FAT firmware partition. Must match the label
+        produced by the bootstrap image (`sdImage.firmwarePartitionName`,
+        which defaults to `FIRMWARE`).
       '';
     };
 
-    firmwareMount = lib.mkOption {
+    rootLabel = lib.mkOption {
       type = lib.types.str;
-      default = "/boot/firmware";
+      default = "NIXOS_BOOT";
       description = ''
-        Mount point of the FAT firmware partition (GPU boot code, DTBs,
-        overlays, config.txt, u-boot.bin). Matches the layout produced by
-        nixpkgs' sd-image-aarch64.nix.
+        Filesystem label of the ext4 `/boot` partition. Must match
+        {option}`pi5.installer.rootVolumeLabel`.
       '';
     };
   };
@@ -46,18 +43,57 @@ in
         type = "disk";
         device = cfg.device;
 
-        # This disk is declared so disko (and therefore nixos-anywhere) can mount
-        # the existing SD partitions during a soft reset, and so the bootloader
-        # install step has /boot and /boot/firmware mounted in the same run.
+        # This disk is described so disko (and therefore nixos-anywhere) can
+        # mount the existing SD partitions, and so the bootloader install step
+        # has /boot and /boot/firmware mounted in the same run.
         #
-        # Do not rely on the create stage to preserve it. disko's default and
-        # format modes run the nested filesystem `_create` steps, which may mkfs
-        # the partitions (the current disko probes blkid first, but that is an
-        # implementation detail), and `destroy = false` only excludes this disk
-        # from the destroy stage. Use `--disko-mode mount` for soft resets. A
-        # deliberate hard reset may touch or rewrite the SD; it is a disposable
-        # installer medium, so reflash it if the install is interrupted.
+        # Hard resets run disko's create stage for every declared disk. The
+        # preCreateHook below turns that into a no-op for a valid installer SD:
+        # it refuses to create a partition table or filesystem on anything that
+        # does not already look like the bootstrap image. A damaged or blank SD
+        # must be reflashed, not silently re-partitioned.
         destroy = false;
+
+        preCreateHook = ''
+          dev=${lib.escapeShellArg cfg.device}
+          ptype=$(lsblk -dno PTTYPE "$dev" 2>/dev/null || true)
+          case "$ptype" in
+            dos | msdos) ;;
+            *)
+              echo "pi5.sdBoot: $dev is not an existing MBR (dos) SD card; reflash the installer image instead of creating a partition table" >&2
+              exit 1
+              ;;
+          esac
+
+          count=0
+          p1=
+          p2=
+          for part in $(lsblk -ln -o PATH "$dev"); do
+            count=$((count + 1))
+            case "$count" in
+              1) ;;
+              2) p1=$part ;;
+              3) p2=$part ;;
+            esac
+          done
+          if [ "$count" -ne 3 ] || [ -z "$p1" ] || [ -z "$p2" ]; then
+            echo "pi5.sdBoot: $dev must have exactly two partitions (firmware + boot); reflash the installer image" >&2
+            exit 1
+          fi
+
+          p1_type=$(blkid -s TYPE -o value "$p1" 2>/dev/null || true)
+          p2_type=$(blkid -s TYPE -o value "$p2" 2>/dev/null || true)
+          p1_label=$(blkid -s LABEL -o value "$p1" 2>/dev/null || true)
+          p2_label=$(blkid -s LABEL -o value "$p2" 2>/dev/null || true)
+          if [ "$p1_type" != "vfat" ] || [ "$p1_label" != ${lib.escapeShellArg cfg.firmwareLabel} ]; then
+            echo "pi5.sdBoot: $p1 must be vfat labelled ${cfg.firmwareLabel}; reflash the installer image" >&2
+            exit 1
+          fi
+          if [ "$p2_type" != "ext4" ] || [ "$p2_label" != ${lib.escapeShellArg cfg.rootLabel} ]; then
+            echo "pi5.sdBoot: $p2 must be ext4 labelled ${cfg.rootLabel}; reflash the installer image" >&2
+            exit 1
+          fi
+        '';
 
         content = {
           # The SD card is MBR/msdos, not GPT. disko's newer `gpt` type addresses
@@ -71,20 +107,30 @@ in
             {
               name = "firmware";
               fs-type = "fat32";
+              # Match the stock sd-image layout: 8 MiB gap, 256 MiB firmware.
+              start = "8MiB";
+              end = "264MiB";
               content = {
                 type = "filesystem";
                 format = "vfat";
-                mountpoint = cfg.firmwareMount;
+                # Mount by label so a changed device enumeration cannot pick the
+                # wrong partition.
+                device = "/dev/disk/by-label/${cfg.firmwareLabel}";
+                mountpoint = "/boot/firmware";
                 mountOptions = [ "nofail" ];
               };
             }
             {
               name = "nixos_boot";
               fs-type = "ext4";
+              start = "264MiB";
+              end = "100%";
+              bootable = true;
               content = {
                 type = "filesystem";
                 format = "ext4";
-                mountpoint = cfg.bootMount;
+                device = "/dev/disk/by-label/${cfg.rootLabel}";
+                mountpoint = "/boot";
                 mountOptions = [ "noatime" ];
               };
             }
@@ -92,8 +138,27 @@ in
         };
       };
     }
-    (lib.mkIf (lib.hasAttrByPath [ "hardware" "raspberry-pi" "firmware" "path" ] options) {
-      hardware.raspberry-pi.firmware.path = lib.mkDefault cfg.firmwareMount;
-    })
+
+    {
+      assertions =
+        lib.optionals (options.pi5 ? nvme) [
+          {
+            assertion = cfg.device != config.pi5.nvme.device;
+            message = ''
+              pi5.sdBoot.device and pi5.nvme.device must be different disks;
+              disko otherwise has two definitions for the same device.
+            '';
+          }
+        ]
+        ++ lib.optionals (lib.hasAttrByPath [ "hardware" "raspberry-pi" "firmware" "path" ] options) [
+          {
+            assertion = config.hardware.raspberry-pi.firmware.path == "/boot/firmware";
+            message = ''
+              pi5.sdBoot expects the firmware at /boot/firmware (the stock
+              sd-image layout). The firmware activation path must match.
+            '';
+          }
+        ];
+    }
   ];
 }

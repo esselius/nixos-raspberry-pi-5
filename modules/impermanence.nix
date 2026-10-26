@@ -162,19 +162,34 @@ in
 
       timeline = {
         hourly = lib.mkOption {
-          type = lib.types.ints.positive;
+          type = lib.types.ints.unsigned;
           default = 8;
-          description = "Number of hourly snapshots to keep.";
+          description = "Number of hourly snapshots to keep (0 disables).";
         };
         daily = lib.mkOption {
-          type = lib.types.ints.positive;
+          type = lib.types.ints.unsigned;
           default = 7;
-          description = "Number of daily snapshots to keep.";
+          description = "Number of daily snapshots to keep (0 disables).";
+        };
+        weekly = lib.mkOption {
+          type = lib.types.ints.unsigned;
+          default = 0;
+          description = "Number of weekly snapshots to keep (0 disables).";
         };
         monthly = lib.mkOption {
-          type = lib.types.ints.positive;
+          type = lib.types.ints.unsigned;
           default = 3;
-          description = "Number of monthly snapshots to keep.";
+          description = "Number of monthly snapshots to keep (0 disables).";
+        };
+        quarterly = lib.mkOption {
+          type = lib.types.ints.unsigned;
+          default = 0;
+          description = "Number of quarterly snapshots to keep (0 disables).";
+        };
+        yearly = lib.mkOption {
+          type = lib.types.ints.unsigned;
+          default = 0;
+          description = "Number of yearly snapshots to keep (0 disables).";
         };
       };
     };
@@ -221,16 +236,18 @@ in
         #    source of early-boot hangs.
         boot.initrd.systemd.services.root-wipe = {
           description = "Reset the btrfs root subvolume to a pristine empty state";
-          wantedBy = [ "sysroot.mount" ];
+          # RequiredBy, not WantedBy: a failed wipe must stop sysroot.mount
+          # instead of letting the boot continue on a partially wiped root.
+          requiredBy = [ "sysroot.mount" ];
           before = [ "sysroot.mount" ];
           unitConfig.DefaultDependencies = false;
           serviceConfig = {
             Type = "oneshot";
             RemainAfterExit = true;
-            TimeoutStartSec = "30s";
+            TimeoutStartSec = "120s";
           };
           script = ''
-            set -x
+            set -eux
             for _ in $(seq 1 200); do
               [ -e ${lib.escapeShellArg cfg.rootDevice} ] && break
               sleep 0.05
@@ -238,18 +255,34 @@ in
             udevadm settle --timeout=10 || true
 
             mkdir -p /btrfs_tmp
-            mount -o nodiscard ${lib.escapeShellArg cfg.rootDevice} /btrfs_tmp
+            # subvol=/ is required: mounting the filesystem's default subvolume
+            # would make @root resolve inside that subvolume instead of the
+            # top level. disko's own btrfs code mounts the top level explicitly.
+            mount -o subvol=/,nodiscard ${lib.escapeShellArg cfg.rootDevice} /btrfs_tmp
 
             target=${lib.escapeShellArg "/btrfs_tmp/${cfg.rootSubvolume}"}
+            children_file=/run/pi5-root-wipe-children.txt
+
             if [ -e "$target" ]; then
               btrfs property set "$target" ro false 2>/dev/null || true
 
-              btrfs subvolume list -o "$target" > /btrfs_tmp/children.txt
-              while read -r line; do
-                subvolume="''${line##* }"
-                btrfs property set "/btrfs_tmp/$subvolume" ro false 2>/dev/null || true
-                btrfs subvolume delete "/btrfs_tmp/$subvolume"
-              done < /btrfs_tmp/children.txt
+              # btrfs lists children parent-first, which is the wrong order for
+              # deletion. Repeat passes: each pass deletes the leaves that are
+              # currently deletable, until no more progress is made.
+              btrfs subvolume list -o "$target" > "$children_file"
+              while [ -s "$children_file" ]; do
+                removed=0
+                while read -r line; do
+                  subvolume="''${line#* path }"
+                  [ -n "$subvolume" ] || continue
+                  btrfs property set "/btrfs_tmp/$subvolume" ro false 2>/dev/null || true
+                  if btrfs subvolume delete "/btrfs_tmp/$subvolume"; then
+                    removed=1
+                  fi
+                done < "$children_file"
+                [ "$removed" -eq 1 ] || break
+                btrfs subvolume list -o "$target" > "$children_file"
+              done
 
               btrfs subvolume delete "$target"
             fi
@@ -268,7 +301,10 @@ in
           TIMELINE_CLEANUP = true;
           TIMELINE_LIMIT_HOURLY = toString cfg.snapshots.timeline.hourly;
           TIMELINE_LIMIT_DAILY = toString cfg.snapshots.timeline.daily;
+          TIMELINE_LIMIT_WEEKLY = toString cfg.snapshots.timeline.weekly;
           TIMELINE_LIMIT_MONTHLY = toString cfg.snapshots.timeline.monthly;
+          TIMELINE_LIMIT_QUARTERLY = toString cfg.snapshots.timeline.quarterly;
+          TIMELINE_LIMIT_YEARLY = toString cfg.snapshots.timeline.yearly;
         };
 
         # snapper always stores snapshots in <SUBVOLUME>/.snapshots and requires
@@ -321,7 +357,31 @@ in
                 elsewhere.
               '';
             }
+            {
+              assertion = (lib.count (mountpoint: mountpoint == "/") (lib.attrValues nvme.subvolumes)) == 1;
+              message = ''
+                Exactly one pi5.nvme.subvolumes entry must mount at "/", otherwise
+                disko has two roots or none.
+              '';
+            }
           ]
+          ++ lib.optional (lib.hasAttr cfg.persistPath config.fileSystems) {
+            assertion = config.fileSystems.${cfg.persistPath}.fsType == "btrfs";
+            message = ''
+              pi5.impermanence.persistPath ("${cfg.persistPath}") must be a btrfs
+              filesystem, because root-wipe/snapper operate on btrfs.
+            '';
+          }
+          ++
+            lib.optional
+              (cfg.snapshots.enable && snapshotsMount != null && lib.hasAttr snapshotsMount config.fileSystems)
+              {
+                assertion = config.fileSystems.${snapshotsMount}.fsType == "btrfs";
+                message = ''
+                  pi5.impermanence.snapshots mount ("${toString snapshotsMount}")
+                  must be a btrfs filesystem.
+                '';
+              }
           ++ lib.optional cfg.snapshots.enable {
             assertion = snapshotsMount != null;
             message = ''
