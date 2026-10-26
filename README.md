@@ -332,7 +332,7 @@ pi5-image provision --host HOST [--flake FLAKE] DISK TARGET
   `remote` builds the closure on the Pi, which is useful when the workstation cannot build
   aarch64-linux.
 - `--wipe-nvme /dev/nvme0n1` runs `blkdiscard` on the target before installing; use it after
-  a previous ZFS pool. It refuses `/dev/mmcblk*` and `/dev/loop*`.
+  a previous ZFS pool. It only accepts NVMe device paths and refuses `/dev/mmcblk*`/`/dev/loop*`.
 - `install`/`provision` verify that the target has `VARIANT_ID=installer` before running
   `nixos-anywhere`; `--allow-non-installer` bypasses the check.
 - `provision --no-wait` stops after flashing and leaves the install command for later.

@@ -442,6 +442,10 @@ do_install() {
 
   if [ -n "$wipe_nvme" ]; then
     case "$wipe_nvme" in
+      *nvme*) ;;
+      *) die "--wipe-nvme only accepts an NVMe device path (got: $wipe_nvme)" ;;
+    esac
+    case "$wipe_nvme" in
       /dev/mmcblk* | /dev/loop*)
         die "refusing --wipe-nvme on SD/eMMC/loop device: $wipe_nvme"
         ;;
