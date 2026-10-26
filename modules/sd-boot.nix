@@ -64,6 +64,13 @@ in
               exit 1
               ;;
           esac
+          # disko's table _create uses this exact probe to decide whether to
+          # run `parted mklabel`. If it would fail, disko would repartition the
+          # card; refuse before that happens.
+          if ! blkid "$dev" >/dev/null 2>&1; then
+            echo "pi5.sdBoot: blkid does not recognize $dev; refusing to let disko repartition it; reflash the installer image" >&2
+            exit 1
+          fi
 
           count=0
           p1=
