@@ -66,9 +66,9 @@ in
       type = lib.types.str;
       default = "NIXOS_BOOT";
       description = ''
-        Filesystem label of the ext4 boot/root partition on the SD card. The
-        sd-boot module does not depend on the label (it mounts the partitions
-        by layout), but U-Boot's extlinux lookup uses this partition.
+        Filesystem label of the ext4 boot/root partition on the SD card. Must
+        match {option}`pi5.sdBoot.rootLabel` if the target host uses the sd-boot
+        module.
       '';
     };
 
