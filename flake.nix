@@ -79,14 +79,16 @@
           };
 
         # Everything except a boot medium. Only useful when composing yourself.
+        # The three parts are the granular wrappers, so a change to one of them
+        # cannot leave the base stack behind.
         base =
           { ... }:
           {
             imports = [
-              nixos-hardware.nixosModules.raspberry-pi-5
-              disko.nixosModules.disko
-              impermanence.nixosModules.impermanence
-              ./modules/base.nix
+              self.nixosModules.hardware
+              self.nixosModules.storage
+              self.nixosModules.impermanence
+              ./modules/require-boot-medium.nix
             ];
           };
 
@@ -146,8 +148,7 @@
           { ... }:
           {
             imports = [
-              nixos-hardware.nixosModules.raspberry-pi-5
-              ./modules/raspberry-pi-5.nix
+              self.nixosModules.hardware
               ./modules/installer.nix
             ];
           };

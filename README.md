@@ -16,7 +16,7 @@ The build, flash, and install steps are plain `nix build`, `dd`, and
 
 | Path | What it is |
 |------|------------|
-| `modules/base.nix` | The stack without a boot medium: hardware, storage, impermanence. Not bootable on its own. |
+| `modules/require-boot-medium.nix` | The assertion that the stack you imported picked a boot medium. |
 | `modules/boot/sd.nix` | disko description of the SD card's existing firmware and `/boot` partitions. |
 | `modules/boot/nvme.nix` | The three-partition NVMe-only layout and the patched U-Boot. |
 | `modules/storage.nix` | btrfs subvolumes, mount options, fstrim, auto-scrub. |

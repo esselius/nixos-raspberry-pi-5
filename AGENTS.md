@@ -12,9 +12,10 @@ build (`nix build .#images.<name>`), flash (`zstd -dc | dd`), and install
 
 ## Shape
 
-- `modules/base.nix` is the stack without a boot medium. `sd-boot` and
-  `nvme-boot` are the two full stacks, named after the boot medium they choose.
-  There is no default boot path. Snapper stays opt-in.
+- `base` (in `flake.nix`) is `hardware` + `storage` + `impermanence`, with no
+  boot medium. `sd-boot` and `nvme-boot` are the two full stacks, named after
+  the boot medium they choose. There is no default boot path. Snapper stays
+  opt-in.
 - The flake wrappers, not the module files, import `nixos-hardware`, `disko`,
   and `impermanence`, so consumers never pass `inputs` through `specialArgs`.
 - `modules/lib/labels.nix` is the only definition of the partition labels and SD
