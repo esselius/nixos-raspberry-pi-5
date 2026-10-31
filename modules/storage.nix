@@ -1,6 +1,7 @@
 { config, lib, ... }:
 let
   cfg = config.pi5.nvme;
+  labels = import ./lib/labels.nix;
   persistMount = lib.attrByPath [ "@persist" ] null cfg.subvolumes;
 
   subvolume = mountpoint: {
@@ -24,7 +25,7 @@ in
 
     partitionLabel = lib.mkOption {
       type = lib.types.str;
-      default = "NVME_ROOT";
+      default = labels.nvmeRootLabel;
       description = ''
         GPT partition label for the btrfs partition. The label (not the kernel
         device name) is what `pi5.impermanence` uses to find the filesystem in

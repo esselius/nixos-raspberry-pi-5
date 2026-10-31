@@ -7,6 +7,7 @@
 }:
 let
   cfg = config.pi5.installer;
+  labels = import ./lib/labels.nix;
 in
 {
   imports = [
@@ -58,13 +59,13 @@ in
 
     firmwareSize = lib.mkOption {
       type = lib.types.ints.positive;
-      default = 256;
+      default = labels.firmwareSizeMiB;
       description = "Size of the FAT firmware partition, in MiB.";
     };
 
     rootVolumeLabel = lib.mkOption {
       type = lib.types.str;
-      default = "NIXOS_BOOT";
+      default = labels.sdBootLabel;
       description = ''
         Filesystem label of the ext4 boot/root partition on the installer SD
         card. Must match {option}`pi5.sdBoot.rootLabel` for SD-boot targets. It
@@ -112,6 +113,7 @@ in
 
     sdImage = {
       firmwareSize = cfg.firmwareSize;
+      firmwarePartitionName = labels.firmwareLabel;
       rootVolumeLabel = cfg.rootVolumeLabel;
       preBuildCommands = lib.mkDefault ''
         # With sdImage.compressImage = true, root_fs is a writable decompressed

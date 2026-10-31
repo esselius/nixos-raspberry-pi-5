@@ -95,7 +95,7 @@ Examples:
   pi5-image flash pi5-bootstrap.img /dev/rdisk4
   pi5-image install --flake . --host rpi5-8gb root@192.168.50.80
   pi5-image provision --flake . --host rpi5-8gb /dev/rdisk4 root@192.168.50.80
-  pi5-image eeprom --eeprom-config examples/nvme-boot/boot.conf root@192.168.50.80
+  pi5-image eeprom --eeprom-config eeprom/boot.conf root@192.168.50.80
   pi5-image provision --flake . --host rpi5-8gb --eeprom-config boot.conf \
     /dev/rdisk4 root@192.168.50.80
 

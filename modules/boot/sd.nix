@@ -6,6 +6,7 @@
 }:
 let
   cfg = config.pi5.sdBoot;
+  labels = import ../lib/labels.nix;
 in
 {
   options.pi5.sdBoot = {
@@ -19,17 +20,16 @@ in
 
     firmwareLabel = lib.mkOption {
       type = lib.types.str;
-      default = "FIRMWARE";
+      default = labels.firmwareLabel;
       description = ''
         Filesystem label of the FAT firmware partition. Must match the label
-        produced by the bootstrap image (`sdImage.firmwarePartitionName`,
-        which defaults to `FIRMWARE`).
+        produced by the bootstrap image (`sdImage.firmwarePartitionName`).
       '';
     };
 
     rootLabel = lib.mkOption {
       type = lib.types.str;
-      default = "NIXOS_BOOT";
+      default = labels.sdBootLabel;
       description = ''
         Filesystem label of the ext4 `/boot` partition. Must match
         {option}`pi5.installer.rootVolumeLabel`.
@@ -114,9 +114,10 @@ in
             {
               name = "firmware";
               fs-type = "fat32";
-              # Match the stock sd-image layout: 8 MiB gap, 256 MiB firmware.
-              start = "8MiB";
-              end = "264MiB";
+              # Match the stock sd-image layout: an 8 MiB gap, then the
+              # firmware partition. Both numbers come from modules/lib/labels.nix.
+              start = labels.firmwareStart;
+              end = labels.firmwareEnd;
               content = {
                 type = "filesystem";
                 format = "vfat";
@@ -153,7 +154,7 @@ in
           message = ''
             pi5.sdBoot and pi5.nvmeBoot describe different /boot media and
             both claim /boot and /boot/firmware. Choose exactly one boot
-            module: nixosModules.sd-boot or nixosModules.nvme-boot.
+            module: nixosModules.boot-sd or nixosModules.boot-nvme.
           '';
         }
       ]

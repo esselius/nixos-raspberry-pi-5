@@ -9,6 +9,15 @@ let
 
   hasNvme = options.pi5 ? nvme;
   nvme = config.pi5.nvme or { };
+  subvolumes = nvme.subvolumes or { };
+  labels = import ./lib/labels.nix;
+
+  # The storage layout owns the subvolume names; this module owns what is
+  # persisted. When the nvme layout is imported, take the names from it so the
+  # two default sets cannot drift. Without it, fall back to the standalone
+  # defaults below.
+  persistSubvolumeMount = lib.attrByPath [ "@persist" ] null subvolumes;
+  rootSubvolumeNames = lib.attrNames (lib.filterAttrs (_: mount: mount == "/") subvolumes);
 
   snapshotsMount =
     if !cfg.snapshots.enable then
@@ -24,11 +33,18 @@ in
   options.pi5.impermanence = {
     persistPath = lib.mkOption {
       type = lib.types.str;
-      default = "/persist";
+      default = if persistSubvolumeMount != null then persistSubvolumeMount else "/persist";
+      defaultText = lib.literalExpression ''
+        config.pi5.nvme.subvolumes."@persist" or "/persist"
+      '';
       description = ''
         Mount point of the persisted btrfs subvolume. Everything under
         `environment.persistence` survives the per-boot root reset; everything
         outside it does not.
+
+        Defaults to the mount point that `pi5.nvme.subvolumes` assigns to
+        `@persist`, so the layout and the policy cannot disagree. Set it
+        explicitly when using this module without the storage module.
       '';
     };
 
@@ -38,24 +54,31 @@ in
         if hasNvme then
           "/dev/disk/by-partlabel/${nvme.partitionLabel}"
         else
-          "/dev/disk/by-partlabel/NVME_ROOT";
+          "/dev/disk/by-partlabel/${labels.nvmeRootLabel}";
       defaultText = lib.literalExpression ''
         "/dev/disk/by-partlabel/''${config.pi5.nvme.partitionLabel}"
       '';
       description = ''
         Device that holds the btrfs top level, used by the initrd root reset.
         Defaults to the partition label from `pi5.nvme`. Override this when
-        using the impermanence module without the nvme-root module.
+        using the impermanence module without the storage module.
       '';
     };
 
     rootSubvolume = lib.mkOption {
       type = lib.types.strMatching "[A-Za-z0-9@._+-]+";
-      default = "@root";
+      default = if rootSubvolumeNames == [ ] then "@root" else builtins.head rootSubvolumeNames;
+      defaultText = lib.literalExpression ''
+        the subvolume that pi5.nvme.subvolumes mounts at "/", or "@root"
+      '';
       description = ''
         Btrfs subvolume that backs `/`. It is deleted and recreated empty in
         the initrd on every boot. Spaces and slashes are not allowed: the
         initrd parser reads `btrfs subvolume list` output one line at a time.
+
+        Defaults to the subvolume that `pi5.nvme.subvolumes` mounts at `/`, so
+        the layout and the policy cannot disagree. Set it explicitly when using
+        this module without the storage module.
       '';
     };
 
@@ -156,7 +179,7 @@ in
           Mount point of the snapshot subvolume. Defaults to the mount point
           declared for {option}`pi5.impermanence.snapshots.subvolume` in
           `pi5.nvme.subvolumes`. Set this explicitly when using the
-          impermanence module without the nvme-root module.
+          impermanence module without the storage module.
         '';
       };
 
@@ -249,7 +272,7 @@ in
           script = ''
             root_device=${lib.escapeShellArg cfg.rootDevice}
             root_subvolume=${lib.escapeShellArg cfg.rootSubvolume}
-            ${builtins.readFile ./scripts/root-wipe.sh}
+            ${builtins.readFile ./root-wipe.sh}
           '';
         };
       })

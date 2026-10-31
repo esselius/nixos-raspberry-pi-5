@@ -6,11 +6,12 @@
 }:
 let
   cfg = config.pi5.nvmeBoot;
+  labels = import ../lib/labels.nix;
 
   hasNvme = options.pi5 ? nvme;
   hasFirmware = lib.hasAttrByPath [ "hardware" "raspberry-pi" "firmware" "uboot" ] options;
 
-  # The btrfs root subvolume mount options belong to pi5.nvme-root.
+  # The btrfs root subvolume mount options belong to pi5.nvme (storage.nix).
   subvolume = mountpoint: {
     inherit mountpoint;
     mountOptions = config.pi5.nvme.mountOptions;
@@ -27,7 +28,7 @@ in
 
         The flake's `nixosModules.nvme-boot` wrapper sets this to the patched
         build from the `nixpkgs-uboot` input. Set it explicitly when importing
-        `modules/nvme-boot.nix` directly.
+        `modules/boot/nvme.nix` directly.
       '';
     };
 
@@ -52,13 +53,13 @@ in
 
     firmwareLabel = lib.mkOption {
       type = lib.types.str;
-      default = "FIRMWARE";
+      default = labels.firmwareLabel;
       description = "GPT partition label and FAT filesystem label of the firmware partition.";
     };
 
     bootLabel = lib.mkOption {
       type = lib.types.str;
-      default = "NIXOS_BOOT";
+      default = labels.nvmeBootLabel;
       description = "GPT partition label and ext4 filesystem label of the `/boot` partition.";
     };
 
@@ -81,11 +82,11 @@ in
     }
 
     (lib.mkIf (hasNvme && hasFirmware && !(options.pi5 ? sdBoot)) {
-      # Replace nvme-root's single btrfs partition with the NVMe-only boot
-      # layout:
+      # Replace the storage module's single btrfs partition with the NVMe-only
+      # boot layout:
       #
       #   p1 256 MiB FAT32 FIRMWARE   -> /boot/firmware (GPU firmware + U-Boot)
-      #   p2 2 GiB   ext4  NIXOS_BOOT -> /boot (extlinux + kernel + initrd)
+      #   p2 2 GiB   ext4  NVME_BOOT  -> /boot (extlinux + kernel + initrd)
       #   p3 rest    btrfs NVME_ROOT  -> / and subvolumes
       #
       # No SD card is described here. The bootstrap image is only the installer
@@ -161,17 +162,17 @@ in
         {
           assertion = hasNvme;
           message = ''
-            pi5.nvmeBoot needs the NVMe layout options from pi5.nvme-root.
-            Import nixosModules.nvme-root (or use nixosModules.default) before
-            nixosModules.nvme-boot.
+            pi5.nvmeBoot needs the NVMe layout options from pi5.nvme.
+            Import nixosModules.storage (or use the nixosModules.nvme-boot
+            stack) before nixosModules.boot-nvme.
           '';
         }
         {
           assertion = hasFirmware;
           message = ''
             pi5.nvmeBoot needs the Raspberry Pi firmware options. Import
-            nixosModules.raspberry-pi-5 (or use nixosModules.default) before
-            nixosModules.nvme-boot.
+            nixosModules.hardware (or use the nixosModules.nvme-boot stack)
+            before nixosModules.boot-nvme.
           '';
         }
         {
@@ -179,7 +180,7 @@ in
           message = ''
             pi5.sdBoot and pi5.nvmeBoot describe different /boot media and
             both claim /boot and /boot/firmware. Choose exactly one boot
-            module: nixosModules.sd-boot or nixosModules.nvme-boot.
+            module: nixosModules.boot-sd or nixosModules.boot-nvme.
           '';
         }
         {

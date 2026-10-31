@@ -1,6 +1,6 @@
 { lib, pkgs, ... }:
 {
-  # Raspberry Pi 5 hardware support. The flake's `raspberry-pi-5` module wrapper
+  # Raspberry Pi 5 hardware support. The flake's `hardware` module wrapper
   # imports `nixos-hardware.nixosModules.raspberry-pi-5`; this file only adds
   # the two fixes that profile still needs.
   assertions = [

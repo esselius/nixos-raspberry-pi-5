@@ -46,76 +46,83 @@
 
       perSystem = f: nixpkgs.lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
 
-      # Public key used only by the demo host and demo bootstrap output. The
-      # private half was discarded; nobody can log in with this image. Replace
-      # it with your own key in your flake. Real installer configs should pass
-      # their own sshAuthorizedKeys (or import an SSH module).
-      exampleSshKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPVIgmsKXn3UwSmCQ7r0GnIKQ9rxh14VzYm4gtUHhaWi pi5-demo-test-only-no-private-key-retained";
+      # Public key used only by the demo installer output. The private half was
+      # discarded; nobody can log in with this image. Real installer configs
+      # should pass their own sshAuthorizedKeys (or import an SSH module).
+      demoTestSshKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPVIgmsKXn3UwSmCQ7r0GnIKQ9rxh14VzYm4gtUHhaWi pi5-demo-test-only-no-private-key-retained";
 
       # U-Boot 2026.10 with Torsten Duwe's NVMe series and the boot_targets
       # removal follow-up. The patches and their provenance are documented in
-      # nix/patches/uboot/README.md.
-      ubootNvme = nixpkgs-uboot.legacyPackages.aarch64-linux.callPackage ./nix/uboot-nvme.nix { };
+      # patches/uboot/README.md.
+      ubootNvme = nixpkgs-uboot.legacyPackages.aarch64-linux.callPackage ./pkgs/uboot-nvme.nix { };
 
       bootstrap = self.lib.mkPi5Installer {
-        sshAuthorizedKeys = [ exampleSshKey ];
-      };
-
-      exampleSdHost = nixpkgs.lib.nixosSystem {
-        system = "aarch64-linux";
-        modules = [
-          self.nixosModules.default-sd-boot
-          ./examples/host.nix
-        ];
-      };
-
-      exampleNvmeHost = nixpkgs.lib.nixosSystem {
-        system = "aarch64-linux";
-        modules = [
-          self.nixosModules.default-nvme-boot
-          ./examples/nvme-boot/host.nix
-        ];
+        sshAuthorizedKeys = [ demoTestSshKey ];
       };
     in
     {
       # Modules are grouped by concern, but the flake wrappers close over the
       # flake inputs. Consumers therefore never have to pass `inputs` through
       # `specialArgs` or import disko/impermanence/nixos-hardware themselves.
+      #
+      # There is no default boot medium. `sd-boot` and `nvme-boot` are the two
+      # full stacks and are named after the choice they make. Everything else
+      # is a part of a stack; `base` is the stack with the boot medium removed.
       nixosModules = {
-        # The stack without a boot medium. Choose one explicitly with
-        # `sd-boot` or `nvme-boot`, or use one of the full-stack wrappers below.
-        default =
+        # Full stacks. Import exactly one.
+        sd-boot =
+          { ... }:
+          {
+            imports = [
+              self.nixosModules.base
+              self.nixosModules.boot-sd
+            ];
+          };
+
+        nvme-boot =
+          { ... }:
+          {
+            imports = [
+              self.nixosModules.base
+              self.nixosModules.boot-nvme
+            ];
+          };
+
+        # Everything except a boot medium. Only useful when composing yourself.
+        base =
           { ... }:
           {
             imports = [
               nixos-hardware.nixosModules.raspberry-pi-5
               disko.nixosModules.disko
               impermanence.nixosModules.impermanence
-              ./modules/default.nix
+              ./modules/base.nix
             ];
           };
 
-        # Full stacks for the two supported boot media. Both are explicit
-        # opt-ins; `default` alone is not bootable.
-        default-sd-boot =
+        # Parts.
+        boot-sd =
           { ... }:
           {
             imports = [
-              self.nixosModules.default
-              self.nixosModules.sd-boot
+              disko.nixosModules.disko
+              ./modules/boot/sd.nix
             ];
           };
 
-        default-nvme-boot =
+        # Needs the hardware and storage modules; the `nvme-boot` stack wires
+        # all three together and sets the patched U-Boot.
+        boot-nvme =
           { ... }:
           {
             imports = [
-              self.nixosModules.default
-              self.nixosModules.nvme-boot
+              disko.nixosModules.disko
+              ./modules/boot/nvme.nix
             ];
+            pi5.nvmeBoot.ubootPackage = nixpkgs.lib.mkDefault ubootNvme;
           };
 
-        raspberry-pi-5 =
+        hardware =
           { ... }:
           {
             imports = [
@@ -124,35 +131,13 @@
             ];
           };
 
-        nvme-root =
+        storage =
           { ... }:
           {
             imports = [
               disko.nixosModules.disko
-              ./modules/nvme-root.nix
+              ./modules/storage.nix
             ];
-          };
-
-        sd-boot =
-          { ... }:
-          {
-            imports = [
-              disko.nixosModules.disko
-              ./modules/sd-boot.nix
-            ];
-          };
-
-        # NVMe-only boot: firmware + U-Boot + /boot live on the NVMe, so the SD
-        # card is only the installer medium. This module needs the hardware and
-        # nvme-root modules; `default-nvme-boot` wires all three together.
-        nvme-boot =
-          { ... }:
-          {
-            imports = [
-              disko.nixosModules.disko
-              ./modules/nvme-boot.nix
-            ];
-            pi5.nvmeBoot.ubootPackage = nixpkgs.lib.mkDefault ubootNvme;
           };
 
         impermanence =
@@ -164,6 +149,9 @@
             ];
           };
 
+        # Turns a configuration into the throwaway bootstrap SD image. This is
+        # a role, not a stack: use `lib.mkPi5Installer` rather than importing it
+        # directly.
         installer =
           { ... }:
           {
@@ -199,16 +187,10 @@
           ++ extraModules;
         };
 
-      nixosConfigurations = {
-        # A throwaway installer image. It is a normal nixosConfiguration so the
-        # CLI can address it as `.#pi5-bootstrap`.
-        pi5-bootstrap = bootstrap;
-
-        # Evaluation examples for the full host stacks. They are not meant to
-        # be real machines; see examples/.
-        pi5-example = exampleSdHost;
-        pi5-nvme-example = exampleNvmeHost;
-      };
+      # A throwaway installer image. It is a normal nixosConfiguration so the
+      # CLI can address it as `.#pi5-bootstrap`. There are deliberately no host
+      # configurations here: hosts belong in the consuming flake.
+      nixosConfigurations.pi5-bootstrap = bootstrap;
 
       images.pi5-bootstrap = bootstrap.config.system.build.sdImage;
 
@@ -216,7 +198,7 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          pi5-image = pkgs.callPackage ./nix/pi5-image.nix { };
+          pi5-image = pkgs.callPackage ./pkgs/pi5-image.nix { };
         in
         {
           inherit pi5-image;
@@ -280,91 +262,162 @@
       checks = perSystem (
         system: pkgs:
         let
-          # Force evaluation of every host closure. This catches broken module
-          # wiring without building an aarch64-linux system on a Mac.
-          drvs = map (c: c.config.system.build.toplevel) (builtins.attrValues self.nixosConfigurations) ++ [
-            bootstrap.config.system.build.sdImage
+          lib = nixpkgs.lib;
+
+          # A stack configuration with a minimal host. These are the only
+          # full-stack configurations that exist in this repo: the hosts live in
+          # the consuming flake, so a host here would be an example by another
+          # name.
+          mkStackConfig =
+            modules: extra:
+            lib.nixosSystem {
+              system = "aarch64-linux";
+              modules = modules ++ [
+                {
+                  networking.hostName = "stack-check";
+                  system.stateVersion = "26.05";
+                }
+                extra
+              ];
+            };
+
+          goodSd = mkStackConfig [ self.nixosModules.sd-boot ] { };
+          goodNvme = mkStackConfig [ self.nixosModules.nvme-boot ] { };
+
+          # Failed assertion messages, or null if evaluation itself threw (an
+          # unknown option, a type error). Matching messages is what makes these
+          # tests test the assertion: a tryEval on `drvPath` accepts any error,
+          # so renaming an option would keep every case green.
+          failedMessages =
+            cfg:
+            let
+              messages = map (a: a.message) (builtins.filter (a: !a.assertion) cfg.config.assertions);
+              result = builtins.tryEval (builtins.deepSeq messages messages);
+            in
+            if result.success then result.value else null;
+
+          # Assertion messages are multi-line; collapse the formatting before
+          # matching so a case does not depend on where the line breaks fall.
+          normalize =
+            message:
+            lib.concatStringsSep " " (
+              builtins.filter (word: word != "") (
+                lib.splitString " " (builtins.replaceStrings [ "\n" "\t" ] [ " " " " ] message)
+              )
+            );
+
+          # `expect = null` means "this configuration must raise no assertion".
+          casePasses =
+            { config, expect, ... }:
+            let
+              messages = failedMessages config;
+            in
+            if messages == null then
+              false
+            else if expect == null then
+              messages == [ ]
+            else
+              lib.any (message: lib.hasInfix expect (normalize message)) messages;
+
+          cases = [
+            {
+              name = "good sd-boot stack evaluates";
+              config = goodSd;
+              expect = null;
+            }
+            {
+              name = "good nvme-boot stack evaluates";
+              config = goodNvme;
+              expect = null;
+            }
+            {
+              name = "base alone has no boot medium";
+              config = mkStackConfig [ self.nixosModules.base ] { };
+              expect = "does not select a boot medium";
+            }
+            {
+              name = "both boot media are rejected";
+              config = mkStackConfig [
+                self.nixosModules.sd-boot
+                self.nixosModules.boot-nvme
+              ] { };
+              expect = "describe different /boot media";
+            }
+            {
+              name = "SD device cannot be the NVMe device";
+              config = mkStackConfig [ self.nixosModules.sd-boot ] {
+                pi5.sdBoot.device = "/dev/nvme0n1";
+              };
+              expect = "must be different disks";
+            }
+            {
+              name = "missing @nix is rejected while the root is reset";
+              config = mkStackConfig [ self.nixosModules.sd-boot ] {
+                pi5.nvme.subvolumes = {
+                  "@root" = "/";
+                  "@persist" = "/persist";
+                  "@snapshots" = "/snapshots";
+                };
+              };
+              expect = ''must map "@nix" to "/nix"'';
+            }
+            {
+              name = "two subvolumes cannot mount at /";
+              config = mkStackConfig [ self.nixosModules.sd-boot ] {
+                pi5.nvme.subvolumes = {
+                  "@root" = "/";
+                  "@other" = "/";
+                  "@nix" = "/nix";
+                  "@persist" = "/persist";
+                };
+              };
+              expect = "Exactly one pi5.nvme.subvolumes entry must mount at";
+            }
+            {
+              name = "persist path must be a btrfs filesystem";
+              config = mkStackConfig [ self.nixosModules.sd-boot ] {
+                # A declared non-btrfs filesystem, so the case reaches the
+                # assertion instead of throwing while nixpkgs computes the
+                # initrd's supported filesystems.
+                fileSystems."/not-btrfs" = {
+                  device = "tmpfs";
+                  fsType = "tmpfs";
+                };
+                pi5.impermanence.persistPath = "/not-btrfs";
+              };
+              expect = "must be a declared btrfs filesystem";
+            }
+            {
+              name = "NVMe firmware and boot labels must differ";
+              config = mkStackConfig [ self.nixosModules.nvme-boot ] {
+                pi5.nvmeBoot.bootLabel = "FIRMWARE";
+              };
+              expect = "must differ";
+            }
+            {
+              name = "NVMe boot needs patched U-Boot 2026.10";
+              config = mkStackConfig [ self.nixosModules.nvme-boot ] {
+                pi5.nvmeBoot.ubootPackage = nixpkgs.legacyPackages.aarch64-linux.ubootRaspberryPiAarch64;
+              };
+              expect = "requires U-Boot 2026.10";
+            }
+            {
+              name = "installer needs a root SSH key";
+              config = self.lib.mkPi5Installer { };
+              expect = "needs at least one root SSH key";
+            }
           ];
 
-          mkAssertionConfig =
-            extra:
-            nixpkgs.lib.nixosSystem {
-              system = "aarch64-linux";
-              modules = [
-                self.nixosModules.default-sd-boot
-                {
-                  networking.hostName = "assertion-test";
-                  system.stateVersion = "26.05";
-                }
-                extra
-              ];
-            };
+          failedCases = builtins.filter (case: !(casePasses case)) cases;
 
-          mkNvmeConfig =
-            extra:
-            nixpkgs.lib.nixosSystem {
-              system = "aarch64-linux";
-              modules = [
-                self.nixosModules.default-nvme-boot
-                {
-                  networking.hostName = "nvme-assertion-test";
-                  system.stateVersion = "26.05";
-                }
-                extra
-              ];
-            };
-
-          # `default` deliberately has no boot medium; importing it alone must
-          # fail with the "choose sd-boot or nvme-boot" assertion.
-          bareConfig = nixpkgs.lib.nixosSystem {
-            system = "aarch64-linux";
-            modules = [
-              self.nixosModules.default
-              {
-                networking.hostName = "bare-assertion-test";
-                system.stateVersion = "26.05";
-              }
-            ];
-          };
-
-          # Both boot media claim /boot; they must not be combined.
-          bothBootConfig = nixpkgs.lib.nixosSystem {
-            system = "aarch64-linux";
-            modules = [
-              self.nixosModules.default-sd-boot
-              self.nixosModules.nvme-boot
-              {
-                networking.hostName = "both-boot-assertion-test";
-                system.stateVersion = "26.05";
-              }
-            ];
-          };
-
-          fails = config: !(builtins.tryEval config.config.system.build.toplevel.drvPath).success;
-          assertionsOk =
-            fails (mkAssertionConfig {
-              pi5.nvme.subvolumes = {
-                "@root" = "/";
-                "@persist" = "/persist";
-                "@snapshots" = "/snapshots";
-              };
-            })
-            && fails (mkAssertionConfig {
-              pi5.sdBoot.device = "/dev/nvme0n1";
-            })
-            && fails (mkAssertionConfig {
-              pi5.impermanence.persistPath = "/not-a-fs";
-            })
-            && fails bareConfig
-            && fails bothBootConfig
-            && fails (mkNvmeConfig {
-              pi5.nvmeBoot.firmwareLabel = "NIXOS_BOOT";
-            })
-            && fails (mkNvmeConfig {
-              pi5.nvmeBoot.ubootPackage = nixpkgs.legacyPackages.aarch64-linux.ubootRaspberryPiAarch64;
-            })
-            && !(fails (mkAssertionConfig { }))
-            && !(fails (mkNvmeConfig { }));
+          # Force the full closures, not just the assertions. The stacks above
+          # cover the eval that the old example hosts used to cover.
+          drvs = [
+            bootstrap.config.system.build.toplevel
+            bootstrap.config.system.build.sdImage
+            goodSd.config.system.build.toplevel
+            goodNvme.config.system.build.toplevel
+          ];
         in
         {
           # Cross-system check that the CLI wrapper still builds (and passes
@@ -373,11 +426,14 @@
 
           # Negative tests for the assertions that prevent data loss.
           assertions = pkgs.runCommand "assertions" { } (
-            if assertionsOk then
+            if failedCases == [ ] then
               "touch $out"
             else
               ''
-                echo "pi5 assertion checks failed: a known-bad config evaluated or the good config did not" >&2
+                echo "pi5 assertion checks failed:" >&2
+                ${lib.concatMapStringsSep "\n" (
+                  case: "echo ${lib.escapeShellArg ("  - " + case.name)} >&2"
+                ) failedCases}
                 exit 1
               ''
           );
@@ -411,7 +467,7 @@
               }
               ''
                 cd "$src"
-                shellcheck modules/scripts/*.sh scripts/*.sh
+                shellcheck modules/*.sh scripts/*.sh
                 touch $out
               '';
         }

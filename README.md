@@ -1,72 +1,74 @@
 # NixOS on Raspberry Pi 5 with an NVMe root
 
-Reusable NixOS modules and an imaging/provisioning CLI for bringing a Raspberry Pi 5 online with:
+Reusable NixOS modules and an imaging CLI for a Raspberry Pi 5 with an
+ephemeral btrfs root on NVMe, and a throwaway SD-card installer for
+`nixos-anywhere` (no kexec).
 
-- two explicit boot paths: a microSD-owned bootloader, or NVMe-only boot with the SD card removed,
-- an ephemeral btrfs root on NVMe (impermanence),
-- a one-shot bootstrap installer image for `nixos-anywhere`, without kexec.
+I reinstall the same Pi 5 hosts often enough that re-deriving the boot chain
+each time is a tax, so the knowledge lives here once. Import a stack, set a
+hostname, done. There is no default boot medium: `sd-boot` is the stock layout
+that needs no patches, `nvme-boot` keeps firmware, U-Boot, and `/boot` on the
+NVMe and carries a patched U-Boot until the fixes land upstream.
 
 ```mermaid
 flowchart LR
     cli["pi5-image CLI"] -->|build| img["Bootstrap SD image<br/>no kexec"]
     img -->|flash| inst["Installer boots on Pi"]
 ```
-```mermaid
-flowchart LR
-    sd["microSD<br/>firmware + U-Boot + extlinux"] --> kern["Vendor kernel + initrd"]
-    kern --> nvme["NVMe btrfs<br/>@root · @nix · @persist"]
-    nvme --> cfg["Impermanence<br/>root wipe + persisted paths"]
-```
-```mermaid
-flowchart LR
-    eeprom["EEPROM 0xf416"] --> fw["NVMe p1 FAT<br/>firmware + patched U-Boot"]
-    fw --> boot["NVMe p2 ext4<br/>extlinux + kernel + initrd"]
-    boot --> root["NVMe p3 btrfs<br/>@root · @nix · @persist"]
-```
 
-This is the Pi 5 + NVMe + boot/storage layer extracted from
-[`esselius/nix-homelab-hosts`](https://github.com/esselius/nix-homelab-hosts), where the
-same design has been exercised on real 4 GB and 8 GB boards. The application layer
-(incus, WireGuard, DNS, sops, monitoring, caches) deliberately stays in that project.
+## The tree
 
-The SD-boot path is the original, stock layout. The NVMe-only path is the
-alternative proven in the `2026-10-30-rpi5-bootloader` bring-up repository: the
-Pi firmware loads U-Boot and extlinux from the NVMe itself, so the SD card is
-only the installer medium and can be removed after installation.
+| Path | What it is |
+|------|------------|
+| `modules/base.nix` | The stack without a boot medium: hardware, storage, impermanence. Not bootable on its own. |
+| `modules/boot/sd.nix` | disko description of the SD card's existing firmware and `/boot` partitions. |
+| `modules/boot/nvme.nix` | The three-partition NVMe-only layout and the patched U-Boot. |
+| `modules/storage.nix` | btrfs subvolumes, mount options, fstrim, auto-scrub. |
+| `modules/impermanence.nix` | What persists, the per-boot root reset, optional snapper. |
+| `modules/installer.nix` | Turns a configuration into the throwaway bootstrap SD image. |
+| `modules/raspberry-pi-5.nix` | The two fixes the `nixos-hardware` Pi 5 profile still needs. |
+| `modules/lib/labels.nix` | Partition labels and SD geometry shared by the image and the hosts. |
+| `modules/root-wipe.sh` | The initrd script that resets `@root`. |
+| `pkgs/pi5-image.nix`, `scripts/pi5-image.sh` | The CLI: a `writeShellApplication` wrapper and its script. |
+| `pkgs/uboot-nvme.nix`, `patches/uboot/` | Patched U-Boot 2026.10 and the provenance of every patch. |
+| `eeprom/` | The non-declarative Pi 5 bootloader configuration. |
+| `flake.nix` | The public surface: modules, `mkPi5Installer`, the CLI, the demo image. |
 
-## What is in the box
+## Flake outputs
 
-| Output | Purpose |
-|--------|---------|
-| `nixosModules.default` | The stack without a boot medium: Pi 5 hardware, NVMe root, impermanence (snapshots opt-in). Add `sd-boot` or `nvme-boot`. |
-| `nixosModules.default-sd-boot` | The full stack with the bootloader on the microSD card. |
-| `nixosModules.default-nvme-boot` | The full stack with firmware + U-Boot + `/boot` on the NVMe; no SD card at runtime. |
-| `nixosModules.raspberry-pi-5` | Pi 5 vendor kernel, firmware staging, U-Boot, initrd module closure fix. |
-| `nixosModules.nvme-root` | disko layout for the NVMe btrfs subvolumes, fstrim, and auto-scrub. |
-| `nixosModules.sd-boot` | A guarded disko description of the SD card's existing partitions. |
-| `nixosModules.nvme-boot` | GPT firmware + `/boot` partitions on NVMe and the patched U-Boot 2026.10. |
-| `nixosModules.impermanence` | Per-boot root reset, persisted paths, and optional snapper. |
-| `nixosModules.installer` | Turns a configuration into the throwaway bootstrap SD image. |
-| `lib.mkPi5Installer` | Builds an installer `nixosConfiguration` with a few arguments. |
+There are two full stacks, named after the boot medium they choose. Import
+exactly one.
+
+| Import | Means |
+|--------|-------|
+| `nixosModules.sd-boot` | Everything, with the bootloader on the microSD card. Stock, unpatched. |
+| `nixosModules.nvme-boot` | Everything, with firmware + U-Boot + `/boot` on the NVMe. No SD card at runtime. |
+| `nixosModules.base` | Everything except a boot medium. Only for composing yourself. |
+| `nixosModules.boot-sd` / `boot-nvme` | The granular boot modules. `boot-nvme` needs `hardware` and `storage`. |
+| `nixosModules.hardware` | Pi 5 vendor kernel, firmware staging, U-Boot, initrd module closure fix. |
+| `nixosModules.storage` | The NVMe btrfs layout. |
+| `nixosModules.impermanence` | Per-boot root reset, persisted paths, optional snapper. |
+| `nixosModules.installer` | The installer image role. Use `lib.mkPi5Installer` instead. |
+| `lib.mkPi5Installer` | Builds an installer `nixosConfiguration` from a few arguments. |
 | `packages.pi5-image` / `apps.pi5-image` | Build, flash, install, provision, and apply EEPROM config. |
-| `packages.aarch64-linux.uboot-nvme` | The patched U-Boot 2026.10 used by the NVMe-only path. |
-| `images.pi5-bootstrap` | The demo installer image built from this repository's example. |
+| `packages.aarch64-linux.uboot-nvme` | The patched U-Boot 2026.10. |
+| `images.pi5-bootstrap` | The demo installer image built from this repository. |
 
-The modules close over this flake's `nixos-hardware`, `disko`, and `impermanence` inputs,
-so consumers do not need to pass `inputs` through `specialArgs` or import those modules
-themselves. The NVMe-only path also closes over a pinned `nixpkgs-uboot` input, because the
-flake's main nixpkgs pin ships U-Boot 2026.07, which cannot boot from NVMe. Do not bump the
-main `nixpkgs` pin to get a newer U-Boot: newer `nixos-unstable` removed
-`boot.initrd.systemd.enable`, which `pi5.impermanence` still uses.
+The module wrappers close over this flake's `nixos-hardware`, `disko`, and
+`impermanence` inputs, so consumers do not pass `inputs` through `specialArgs`
+or import those modules themselves. The NVMe-only path also closes over a
+pinned `nixpkgs-uboot` input, because the main nixpkgs pin ships U-Boot
+2026.07, which cannot boot from NVMe. Do not bump the main `nixpkgs` pin to get
+a newer U-Boot: newer `nixos-unstable` removed `boot.initrd.systemd.enable`,
+which `pi5.impermanence` still uses.
 
-The repository's demo installer and example host use a test-only public key whose private
-half was discarded, so the demo image is intentionally unreachable. Replace it with your
-own key when using the examples; real installer configs must set `sshAuthorizedKeys`.
+The demo installer uses a test-only public key whose private half was discarded,
+so it is intentionally unreachable. Real installer configs must set
+`sshAuthorizedKeys`.
 
 ## Architecture
 
-There are two supported boot chains, selected explicitly in the host
-configuration:
+Two boot chains, selected explicitly in the host configuration:
 
 ```
 SD boot:
@@ -79,30 +81,44 @@ NVMe-only boot:
               -> NVMe root (NVMe p3 btrfs)
 ```
 
-- **The boot path is explicit.** `nixosModules.default` is the hardware, NVMe root, and
-  impermanence stack but does not choose a boot medium. Import `nixosModules.sd-boot` or
-  `nixosModules.nvme-boot`, or use `default-sd-boot` / `default-nvme-boot`. The two boot
-  modules are mutually exclusive: they both claim `/boot` and `/boot/firmware`.
-- **SD boot: microSD owns the bootloader.** The SD card has the stock two-partition
-  `sd-image-aarch64` layout. `/boot` is rewritten by the main host configuration on every
-  rebuild.
-- **NVMe-only boot: NVMe owns firmware, U-Boot, and `/boot`.** The SD card is only the
-  installer medium. The NVMe has three partitions: FAT `FIRMWARE`, ext4 `NIXOS_BOOT`, and
-  btrfs `NVME_ROOT`. Remove the SD after installation. The EEPROM keeps the SD fallback so
-  a reflashed installer still boots for recovery.
-- **NVMe owns the system and persistent state.** `@root` is reset on every boot; `@persist`
-  is the only state that survives. `@nix` and `@snapshots` are separate subvolumes.
-- **Vendor kernel, not mainline.** The `nixos-hardware` Raspberry Pi 5 profile defaults to
-  `linux-rpi`. Mainline plus the vendor firmware DTBs produced `rp1_driver -22` (EINVAL)
-  probe failures on real hardware, which killed both USB and Ethernet (the RP1 hosts both).
-  This applies to both boot paths.
-- **No kexec.** The bootstrap image sets `system.nixos.variant_id = "installer"`, which makes
-  `nixos-anywhere` skip kexec. Pi 5 kexec is flaky; SD-image boot is the supported path.
-- **No U-Boot fork, but a temporary patch set for NVMe-only boot.** The SD path uses stock
-  nixpkgs + `nixos-hardware` firmware staging. The NVMe path needs U-Boot 2026.10 with
-  Torsten Duwe's DMA-ranges parent-walk fix and NVMe config, plus a `boot_targets` follow-up.
-  Those patches are carried in `nix/patches/uboot/` and are expected to be dropped once
-  U-Boot ships them.
+```mermaid
+flowchart LR
+    sd["microSD<br/>firmware + U-Boot + extlinux"] --> kern["Vendor kernel + initrd"]
+    kern --> nvme["NVMe btrfs<br/>@root · @nix · @persist"]
+    nvme --> cfg["Impermanence<br/>root wipe + persisted paths"]
+```
+
+```mermaid
+flowchart LR
+    eeprom["EEPROM 0xf416"] --> fw["NVMe p1 FAT<br/>firmware + patched U-Boot"]
+    fw --> boot["NVMe p2 ext4<br/>extlinux + kernel + initrd"]
+    boot --> root["NVMe p3 btrfs<br/>@root · @nix · @persist"]
+```
+
+- **The boot path is explicit.** `base` has no boot medium; the two boot
+  modules are mutually exclusive because they both claim `/boot` and
+  `/boot/firmware`. Importing both is an evaluation error.
+- **SD boot: microSD owns the bootloader.** The card has the stock
+  two-partition `sd-image-aarch64` layout. `/boot` is rewritten by the host
+  configuration on every rebuild.
+- **NVMe-only boot: NVMe owns firmware, U-Boot, and `/boot`.** The SD card is
+  only the installer medium. Remove it after installation; the EEPROM keeps the
+  SD fallback so a reflashed installer still boots for recovery.
+- **NVMe owns the system and persistent state.** `@root` is reset on every
+  boot; `@persist` is the only state that survives. `@nix` and `@snapshots` are
+  separate subvolumes.
+- **Vendor kernel, not mainline.** The `nixos-hardware` profile defaults to
+  `linux-rpi`. Mainline plus the vendor firmware DTBs produced
+  `rp1_driver -22` (EINVAL) probe failures on real hardware, which killed both
+  USB and Ethernet. This applies to both boot paths.
+- **No kexec.** The bootstrap image sets `system.nixos.variant_id =
+  "installer"`, which makes `nixos-anywhere` skip kexec. Pi 5 kexec is flaky;
+  SD-image boot is the supported path.
+- **No U-Boot fork, but a temporary patch set for NVMe-only boot.** The SD path
+  uses stock nixpkgs + `nixos-hardware` firmware staging. The NVMe path needs
+  U-Boot 2026.10 with Torsten Duwe's DMA-ranges parent-walk fix and NVMe
+  config, plus a `boot_targets` follow-up. Those patches are carried in
+  `patches/uboot/` and are expected to be dropped once U-Boot ships them.
 
 ### Design decisions
 
@@ -118,51 +134,57 @@ NVMe-only boot:
 | `/boot` filesystem | ext4 (btrfs unsupported here) | U-Boot's extlinux path reads ext4; the NVMe-only layout keeps `/boot` off the btrfs root. |
 | Install | `nixos-anywhere`, kexec skipped | Pi 5 kexec is flaky; `variant_id = "installer"` makes nixos-anywhere use the SD-image boot path. |
 
-The SD layout is deliberately the stock two-partition shape. A persistent rescue partition
-was tried and dropped: every real incident still ended in a reflash, while the extra
-partition added partition math and boot-order ambiguity.
+The SD layout is deliberately the stock two-partition shape. A persistent rescue
+partition was tried and dropped: every real incident still ended in a reflash,
+while the extra partition added partition math and boot-order ambiguity.
 
 ### SD card layout
 
-Created by flashing the bootstrap image. It is the installer medium for both boot paths,
-and the permanent boot medium for the SD-boot path. Normal rebuilds leave the partitions in
-place and rewrite `/boot`; a hard reset may touch them, so treat the SD card as disposable.
+Created by flashing the bootstrap image. It is the installer medium for both
+boot paths, and the permanent boot medium for the SD-boot path. Normal rebuilds
+leave the partitions in place and rewrite `/boot`; a hard reset may touch them,
+so treat the SD card as disposable.
 
 | Partition | FS | Mount | Contents |
 |-----------|----|-------|----------|
-| p1 | FAT32 | `/boot/firmware` | GPU boot code, DTBs, overlays, `config.txt`, `u-boot.bin` |
-| p2 | ext4, bootable | `/boot` | `extlinux.conf`, kernel, initrd per generation |
+| p1 | FAT32, label `FIRMWARE` | `/boot/firmware` | GPU boot code, DTBs, overlays, `config.txt`, `u-boot.bin` |
+| p2 | ext4, label `NIXOS_BOOT`, bootable | `/boot` | `extlinux.conf`, kernel, initrd per generation |
 
-For the NVMe-only path, the SD card is only needed to boot the installer; remove it after
-`nixos-anywhere` finishes. Keep the reflashed installer as a recovery medium: the EEPROM
-boot order falls back to SD.
+For the NVMe-only path, the SD card is only needed to boot the installer; remove
+it after `nixos-anywhere` finishes. Keep the reflashed installer as a recovery
+medium: the EEPROM boot order falls back to SD.
 
-Use an 8 GB or larger microSD card. The installer's ext4 root is resized to 4 GiB so the
-target closure fits during `nixos-anywhere`; the built image is about 4.3 GiB raw (1.4 GiB
-compressed).
+Use an 8 GB or larger microSD card. The installer's ext4 root is resized to
+4 GiB so the target closure fits during `nixos-anywhere`; the built image is
+about 4.3 GiB raw (1.4 GiB compressed).
 
 ### NVMe layout
 
-The disk that carries the system. A hard reset destroys and recreates it. The partition
-layout depends on the boot path.
+The disk that carries the system. A hard reset destroys and recreates it. The
+partition layout depends on the boot path.
 
 #### SD-boot layout
 
-One btrfs partition (`NVME_ROOT`) holding the subvolumes below. The partition is a plain
-Linux filesystem; the GPT legacy-BIOS-bootable attribute is not set because U-Boot boots
-from the SD card. Existing installs keep it until recreated.
+One btrfs partition (`NVME_ROOT`) holding the subvolumes below. The partition is
+a plain Linux filesystem; the GPT legacy-BIOS-bootable attribute is not set
+because U-Boot boots from the SD card.
 
 #### NVMe-only layout
 
 | Partition | Size | FS | Label | Mount |
 |-----------|------|----|-------|-------|
 | p1 | 256 MiB | FAT32 | `FIRMWARE` | `/boot/firmware` |
-| p2 | 2 GiB | ext4, legacy-BIOS-bootable | `NIXOS_BOOT` | `/boot` |
+| p2 | 2 GiB | ext4, legacy-BIOS-bootable | `NVME_BOOT` | `/boot` |
 | p3 | rest | btrfs | `NVME_ROOT` | `/` + subvolumes |
 
-`pi5.nvmeBoot.firmwareSize` and `pi5.nvmeBoot.bootSize` control the first two sizes. The
-`/boot` partition is marked legacy-BIOS-bootable (GPT attribute bit 2), which U-Boot's
-extlinux bootflow expects. Keep `/boot` on ext4 or FAT, not on the btrfs root.
+`pi5.nvmeBoot.firmwareSize` and `pi5.nvmeBoot.bootSize` control the first two
+sizes. The `/boot` partition is marked legacy-BIOS-bootable (GPT attribute bit
+2), which U-Boot's extlinux bootflow expects. Keep `/boot` on ext4 or FAT, not
+on the btrfs root.
+
+`NVME_BOOT` is deliberately not `NIXOS_BOOT`: that label already names the
+installer SD card's ext4 partition, and an inserted installer SD would make
+`/dev/disk/by-label` lookups ambiguous during recovery.
 
 Both layouts use the same subvolumes on the btrfs partition:
 
@@ -173,8 +195,8 @@ Both layouts use the same subvolumes on the btrfs partition:
 | `@persist` | `/persist` | Persists: `machine-id`, SSH host keys, `/var/lib/nixos`, `/var/log`, plus whatever you add |
 | `@snapshots` | `/snapshots` | snapper's snapshot store for `/persist` |
 
-Mount options are `noatime,compress=zstd,nodiscard`; `services.fstrim` batches discards
-instead of paying write amplification on every freed block.
+Mount options are `noatime,compress=zstd,nodiscard`; `services.fstrim` batches
+discards instead of paying write amplification on every freed block.
 
 ## Quick start
 
@@ -195,49 +217,53 @@ instead of paying write amplification on every freed block.
 
   outputs = { self, nixpkgs, pi5, ... }:
   let
-    # Choose the boot path explicitly. `default` alone has no boot medium.
+    # The boot medium is the choice, so it is the name.
     mkHost = bootModule: modules: nixpkgs.lib.nixosSystem {
       system = "aarch64-linux";
-      modules = [ pi5.nixosModules.default bootModule ] ++ modules;
+      modules = [ pi5.nixosModules.${bootModule} ] ++ modules;
     };
   in {
     nixosConfigurations = {
-      # SD boot path. Add your SSH/user config, services, and host name.
-      rpi5-8gb = mkHost pi5.nixosModules.sd-boot [ ./hosts/rpi5-8gb.nix ];
+      rpi5-8gb = mkHost "sd-boot" [ ./hosts/rpi5-8gb.nix ];
+      rpi5-8gb-nvme = mkHost "nvme-boot" [ ./hosts/rpi5-8gb-nvme.nix ];
 
-      # Optional NVMe-only path (firmware + U-Boot + /boot on the NVMe).
-      rpi5-8gb-nvme = mkHost pi5.nixosModules.nvme-boot [ ./hosts/rpi5-8gb-nvme.nix ];
-
-      # The throwaway installer image.
       rpi5-bootstrap = pi5.lib.mkPi5Installer {
         hostName = "rpi5-bootstrap";
-        sshAuthorizedKeys = [
-          "ssh-ed25519 AAAA... you@workstation"
-        ];
-        extraModules = [
-          { system.stateVersion = "26.05"; }
-        ];
+        sshAuthorizedKeys = [ "ssh-ed25519 AAAA... you@workstation" ];
+        extraModules = [ { system.stateVersion = "26.05"; } ];
       };
     };
 
     images.rpi5-bootstrap =
       self.nixosConfigurations.rpi5-bootstrap.config.system.build.sdImage;
 
-    # Optional: re-export the CLI so `nix run .#pi5-image` works in this repo.
-    # Use aarch64-linux (or x86_64-linux) on a Linux workstation.
+    # Optional: re-export the CLI so `nix run .#pi5-image` works here too.
     packages.aarch64-darwin.pi5-image = pi5.packages.aarch64-darwin.pi5-image;
   };
 }
 ```
 
-`pi5.lib.mkPi5Installer` wires the installer module, Raspberry Pi 5 hardware support, and
-`system.stateVersion`. `extraModules` is where project-wide settings (SSH, Nix settings,
-state version overrides) belong.
+A host module is the hostname, a state version, and your own access policy:
 
-`nixosModules.default` is the hardware, NVMe root, and impermanence stack; it deliberately
-does not pick a boot medium. Add `sd-boot` or `nvme-boot` as above, or use the convenience
-wrappers `default-sd-boot` / `default-nvme-boot`. Importing both boot modules is an
-evaluation error.
+```nix
+# hosts/rpi5-8gb.nix — the whole minimum. Everything Pi 5, NVMe, and boot
+# related comes from the module.
+{
+  networking.hostName = "rpi5-8gb";
+  system.stateVersion = "26.05";
+}
+```
+
+For a non-HAT+ M.2 adapter, add the PCIe setting and the EEPROM config from
+`eeprom/`:
+
+```nix
+hardware.raspberry-pi.configtxt.settings.pi5.dtparam = [ "pciex1" ];
+```
+
+`mkPi5Installer` wires the installer module, Raspberry Pi 5 hardware support,
+and `system.stateVersion`. `extraModules` is where project-wide settings (SSH,
+Nix settings, state version overrides) belong.
 
 ### 2. Build and flash the installer
 
@@ -250,13 +276,13 @@ nix run .#pi5-image -- build --flake . --installer rpi5-bootstrap --output pi5-b
 nix run .#pi5-image -- flash pi5-bootstrap.img /dev/rdisk4
 ```
 
-The CLI refuses `/dev/rdisk0`, partitions, non-whole disks, and the disk that backs the
-running system. It asks for confirmation unless `--yes` is passed.
+The CLI refuses `/dev/rdisk0`, partitions, non-whole disks, and the disk that
+backs the running system. It asks for confirmation unless `--yes` is passed.
 
 ### 3. Boot the Pi and install over the network
 
-Insert the SD card, attach the NVMe, connect Ethernet, and power on. The installer gets an
-address over DHCP. From the workstation:
+Insert the SD card, attach the NVMe, connect Ethernet, and power on. The
+installer gets an address over DHCP. From the workstation:
 
 ```bash
 # First install or a genuine clean slate: disko destroys and recreates the NVMe.
@@ -271,13 +297,13 @@ nix run .#pi5-image -- provision \
   /dev/rdisk4 root@192.168.50.80
 ```
 
-`provision` requires the installer to be reachable at the given address and uses `--mode
-wipe` by default. Pass `--mode mount` to reuse the existing NVMe content.
+`provision` requires the installer to be reachable at the given address and uses
+`--mode wipe` by default. Pass `--mode mount` to reuse the existing NVMe content.
 
 ### 4. Soft reset (reuse the NVMe)
 
-If the SD card or its bootloader is broken but the NVMe is fine, reflash the installer and
-run:
+If the SD card or its bootloader is broken but the NVMe is fine, reflash the
+installer and run:
 
 ```bash
 nix run .#pi5-image -- install \
@@ -285,13 +311,13 @@ nix run .#pi5-image -- install \
   root@192.168.50.80
 ```
 
-`--mode mount` passes `--disko-mode mount` to `nixos-anywhere`, which mounts the existing
-NVMe filesystems and the SD card and then rewrites the system and bootloader without
-destroying the NVMe. This is verified on real hardware in the source project.
+`--mode mount` passes `--disko-mode mount` to `nixos-anywhere`, which mounts the
+existing NVMe filesystems and the SD card and then rewrites the system and
+bootloader without destroying the NVMe.
 
-If the NVMe previously held a ZFS pool, disko may skip `mkfs.btrfs` because the installer
-has ZFS disabled and cannot destroy the pool. Discard the disk first from the booted
-installer, or let the CLI do it:
+If the NVMe previously held a ZFS pool, disko may skip `mkfs.btrfs` because the
+installer has ZFS disabled and cannot destroy the pool. Discard the disk first
+from the booted installer, or let the CLI do it:
 
 ```bash
 nix run .#pi5-image -- provision --flake . --installer rpi5-bootstrap --host rpi5-8gb \
@@ -300,13 +326,13 @@ nix run .#pi5-image -- provision --flake . --installer rpi5-bootstrap --host rpi
 
 ### 5. NVMe-only path (no SD card at runtime)
 
-For a host using `nixosModules.nvme-boot`, the flow is the same until the install, plus a
-one-time EEPROM change so the firmware tries NVMe first:
+For a host using `nixosModules.nvme-boot`, the flow is the same until the
+install, plus a one-time EEPROM change so the firmware tries NVMe first:
 
 ```bash
 # Apply BOOT_ORDER=0xf416 (NVMe -> SD -> USB -> restart) and PCIE_PROBE=1.
 nix run .#pi5-image -- eeprom \
-  --eeprom-config examples/nvme-boot/boot.conf root@<installer-ip>
+  --eeprom-config eeprom/boot.conf root@<installer-ip>
 
 # Install the NVMe-only host. The SD card is only the installer medium now.
 nix run .#pi5-image -- install \
@@ -318,30 +344,29 @@ Or combine the build, flash, EEPROM change, and install:
 ```bash
 nix run .#pi5-image -- provision \
   --flake . --installer rpi5-bootstrap --host rpi5-8gb-nvme \
-  --eeprom-config examples/nvme-boot/boot.conf \
+  --eeprom-config eeprom/boot.conf \
   /dev/rdisk4 root@<installer-ip>
 ```
 
 Power off, remove the SD card, and power on. The firmware should report
-`Boot mode: NVME (06)`, then U-Boot boots `nvme#0...part_2` with extlinux. Keep the
-reflashed installer; with the SD inserted, U-Boot's standard boot order still scans MMC
-before NVMe, so the installer boots for recovery. See `examples/nvme-boot/README.md` for the
-EEPROM details and board-specific PCIe notes.
+`Boot mode: NVME (06)`, then U-Boot boots `nvme#0...part_2` with extlinux. Keep
+the reflashed installer; with the SD inserted, U-Boot's standard boot order
+still scans MMC before NVMe, so the installer boots for recovery. See
+`eeprom/README.md` for the bootloader details and the HAT+ caveat.
 
 ## Module reference
 
-The granular modules are composable. `nixosModules.default` is the base stack
-(`raspberry-pi-5` + `nvme-root` + `impermanence`) and deliberately has no boot medium; add
-`sd-boot` or `nvme-boot`. If you import `nvme-root`, `sd-boot`, `nvme-boot`, or
-`impermanence` individually, also import `raspberry-pi-5` for actual hardware support, and
-make sure the storage modules agree on subvolume names and mount points. `nvme-boot` also
-needs `nvme-root`, because it replaces that module's NVMe partition layout. `impermanence`
-expects a mounted persist filesystem, and derives its root device and snapshot mount from
-`nvme-root` unless you set `rootDevice` and `snapshots.mountPath` yourself.
+`base` is `hardware` + `storage` + `impermanence`, and deliberately has no boot
+medium. `sd-boot` and `nvme-boot` are `base` plus one boot module. If you import
+`storage`, `boot-sd`, `boot-nvme`, or `impermanence` individually, also import
+`hardware` for actual hardware support, and make sure the storage modules agree
+on subvolume names and mount points. `boot-nvme` also needs `storage`, because
+it replaces that module's NVMe partition layout. `impermanence` expects a
+mounted persist filesystem, and derives its root device, root subvolume, persist
+path, and snapshot mount from `storage` unless you set them yourself.
 
-`sd-boot` and `nvme-boot` are mutually exclusive: both claim `/boot` and `/boot/firmware`.
-The full-stack wrappers `default-sd-boot` and `default-nvme-boot` combine the base stack
-with one of them.
+`boot-sd` and `boot-nvme` are mutually exclusive: both claim `/boot` and
+`/boot/firmware`.
 
 ### `pi5.nvme`
 
@@ -363,15 +388,16 @@ The module also enables `services.fstrim` and scrubs the `@persist` mount.
 | `rootLabel` | `"NIXOS_BOOT"` | Must match `pi5.installer.rootVolumeLabel`. |
 
 The mounts are fixed at `/boot/firmware` (vfat) and `/boot` (ext4), matching
-`generic-extlinux-compatible` and the stock sd-image layout. The partitions are mounted by
-filesystem label, not by `mmcblk0pN`.
+`generic-extlinux-compatible` and the stock sd-image layout. The partitions are
+mounted by filesystem label, not by `mmcblk0pN`.
 
-This description exists so disko can mount the SD's existing partitions and give the
-bootloader install its `/boot` and `/boot/firmware`. It has `destroy = false`, and a
-`preCreateHook` that refuses to create a partition table or run `mkfs` on anything that is
-not already a two-partition MBR SD with the expected vfat/ext4 labels. A blank or damaged
-SD must be reflashed; use `--mode mount` for a soft reset. A hard reset still touches the
-SD (as a disposable installer medium).
+This description exists so disko can mount the SD's existing partitions and give
+the bootloader install its `/boot` and `/boot/firmware`. It has `destroy =
+false`, and a `preCreateHook` that refuses to create a partition table or run
+`mkfs` on anything that is not already a two-partition MBR SD with the expected
+vfat/ext4 labels. A blank or damaged SD must be reflashed; use `--mode mount`
+for a soft reset. A hard reset still touches the SD (as a disposable installer
+medium).
 
 ### `pi5.nvmeBoot`
 
@@ -381,26 +407,27 @@ SD (as a disposable installer medium).
 | `firmwareSize` | `256` | MiB FAT firmware partition. |
 | `bootSize` | `"2G"` | ext4 `/boot` partition; size for `configurationLimit` generations. |
 | `firmwareLabel` | `"FIRMWARE"` | GPT partition label and FAT label. |
-| `bootLabel` | `"NIXOS_BOOT"` | GPT partition label and ext4 label. |
+| `bootLabel` | `"NVME_BOOT"` | GPT partition label and ext4 label. |
 | `configurationLimit` | `8` | Applied to `boot.loader.generic-extlinux-compatible`. |
 
-The module replaces `nvme-root`'s single btrfs partition with the three-partition NVMe-only
-layout, mounts `/boot` and `/boot/firmware` from the NVMe, stages the patched U-Boot, and
-turns on `generic-extlinux-compatible`. It asserts that U-Boot is at least 2026.10, that
-`pi5.sdBoot` is not imported, and that the firmware path is `/boot/firmware`.
+The module replaces `storage`'s single btrfs partition with the three-partition
+NVMe-only layout, mounts `/boot` and `/boot/firmware` from the NVMe, stages the
+patched U-Boot, and turns on `generic-extlinux-compatible`. It asserts that
+U-Boot is at least 2026.10, that `pi5.sdBoot` is not imported, and that the
+firmware path is `/boot/firmware`.
 
-The flake's `nixosModules.nvme-boot` wrapper sets `ubootPackage` to
-`packages.aarch64-linux.uboot-nvme`; direct importers of `modules/nvme-boot.nix` must set it
-themselves. The package is built from the `nixpkgs-uboot` input and the patches in
-`nix/patches/uboot/`.
+The flake's `nixosModules.boot-nvme` wrapper sets `ubootPackage` to
+`packages.aarch64-linux.uboot-nvme`; direct importers of `modules/boot/nvme.nix`
+must set it themselves. The package is built from the `nixpkgs-uboot` input and
+the patches in `patches/uboot/`.
 
 ### `pi5.impermanence`
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `persistPath` | `"/persist"` | Must match the `@persist` mount point. |
-| `rootDevice` | `/dev/disk/by-partlabel/<nvme.partitionLabel>` | btrfs top level used by the initrd reset; override when not using `nvme-root`. |
-| `rootSubvolume` | `"@root"` | Deleted and recreated in the initrd on every boot. |
+| `persistPath` | the mount point of `@persist` | Derived from `pi5.nvme.subvolumes`; `"/persist"` when `storage` is not imported. |
+| `rootDevice` | `/dev/disk/by-partlabel/<nvme.partitionLabel>` | btrfs top level used by the initrd reset; override when not using `storage`. |
+| `rootSubvolume` | the subvolume mounted at `/` | Derived from `pi5.nvme.subvolumes`; `"@root"` when `storage` is not imported. |
 | `resetRoot` | `true` | Disable only for a deliberately mutable root. |
 | `directories` | `/var/lib/nixos`, `/var/log` | Replaces the defaults when set. |
 | `extraDirectories` | `[]` | Appended after `directories`; use this to add service state. |
@@ -408,12 +435,15 @@ themselves. The package is built from the `nixpkgs-uboot` input and the patches 
 | `extraFiles` | `[]` | Appended after `files`. |
 | `snapshots.enable` | `false` | Snapper is site policy, not a hardware requirement. |
 | `snapshots.subvolume` | `"@snapshots"` | Bind-mounted at `<persistPath>/.snapshots`. |
-| `snapshots.mountPath` | `null` | Derived from `pi5.nvme.subvolumes`; set explicitly without `nvme-root`. |
+| `snapshots.mountPath` | `null` | Derived from `pi5.nvme.subvolumes`; set explicitly without `storage`. |
 | `snapshots.timeline.{hourly,daily,weekly,monthly,quarterly,yearly}` | `8`, `7`, `0`, `3`, `0`, `0` | Retention counts; `0` disables a bucket. |
 
-`nixosModules.default` (and therefore both full-stack wrappers) does not enable snapshots. Set
-`pi5.impermanence.snapshots.enable = true` in the project/host layer to opt in; the original
-homelab repo does this explicitly in `modules/storage.nix`.
+The storage layout owns the subvolume names; this module owns what is persisted.
+When `storage` is imported, `persistPath` and `rootSubvolume` come from
+`pi5.nvme.subvolumes` and cannot drift from it.
+
+`base` (and therefore both full stacks) does not enable snapshots. Set
+`pi5.impermanence.snapshots.enable = true` in the project/host layer to opt in.
 
 ### `pi5.installer`
 
@@ -430,13 +460,13 @@ homelab repo does this explicitly in `modules/storage.nix`.
 | `extraPackages` | `[]` | Added to the installer environment (`vim` is always included). |
 
 The installer disables ZFS (`boot.supportedFilesystems.zfs = false`). nixpkgs'
-`sd-image-aarch64.nix` pulls in the base profile, which enables ZFS; `zfs-kernel` needs the
-kernel's `dev` output, which is not in the binary caches, so leaving it on forces a full
-`linux-rpi` build for every installer image.
+`sd-image-aarch64.nix` pulls in the base profile, which enables ZFS; `zfs-kernel`
+needs the kernel's `dev` output, which is not in the binary caches, so leaving
+it on forces a full `linux-rpi` build for every installer image.
 
 ### Hardware options
 
-`nixosModules.raspberry-pi-5` sets:
+`nixosModules.hardware` sets:
 
 ```nix
 hardware.raspberry-pi.firmware = {
@@ -449,15 +479,16 @@ hardware.raspberry-pi.firmware = {
 (`hardware.raspberry-pi.firmware.path`, `.package`, `.uboot.package`,
 `.useGenerationDeviceTree`, and `hardware.raspberry-pi.configtxt.*`).
 
-`pi5.nvmeBoot` sets `.uboot.package` to the patched U-Boot 2026.10 and keeps the firmware
-path at `/boot/firmware`. It does not set board-specific PCIe options; for non-HAT+
-adapters, add `hardware.raspberry-pi.configtxt.settings.pi5.dtparam = [ "pciex1" ];` and
+`pi5.nvmeBoot` sets `.uboot.package` to the patched U-Boot 2026.10 and keeps the
+firmware path at `/boot/firmware`. It does not set board-specific PCIe options;
+for non-HAT+ adapters, add
+`hardware.raspberry-pi.configtxt.settings.pi5.dtparam = [ "pciex1" ];` and
 EEPROM `PCIE_PROBE=1`.
 
-The module also applies the `makeModulesClosure` overlay with `allowMissing = true`: the
-vendor kernel does not build every module the Raspberry Pi 5 profile's initrd asks for
-(for example `tpm-crb`), and without the overlay the initrd build fails on the first
-missing module.
+The module also applies the `makeModulesClosure` overlay with `allowMissing =
+true`: the vendor kernel does not build every module the Raspberry Pi 5
+profile's initrd asks for (for example `tpm-crb`), and without the overlay the
+initrd build fails on the first missing module.
 
 ## Imaging CLI
 
@@ -473,35 +504,39 @@ pi5-image eeprom    --eeprom-config FILE [--yes] TARGET
   `nixosConfigurations` and `images`.
 - `--installer` defaults to `pi5-bootstrap` and addresses
   `nixosConfigurations.<name>.config.system.build.sdImage`.
-- `install` defaults to `--mode mount`; `provision` defaults to `--mode wipe`. There is no
-  silent destructive default in `install`.
-- `eeprom` copies a config to the target and applies it with `rpi-eeprom-config --apply`.
-  If the target lacks `rpi-eeprom-config`, it falls back to
-  `nix shell nixpkgs#raspberrypi-eeprom`. `--eeprom-config` on `install`/`provision` applies
-  the same config after the target is reachable and before `nixos-anywhere` runs. EEPROM
-  changes take effect on the next power cycle.
-- `--ssh-key` is passed to both `nixos-anywhere` and the reachability wait; `--ssh-port`
-  and repeatable `--ssh-option` are forwarded too.
-- `--build-on auto|local|remote` is forwarded to `nixos-anywhere`. `auto` is the default;
-  `remote` builds the closure on the Pi, which is useful when the workstation cannot build
-  aarch64-linux.
-- `--wipe-nvme /dev/nvme0n1` runs `blkdiscard` on the target before installing; use it after
-  a previous ZFS pool. It only accepts NVMe device paths and refuses `/dev/mmcblk*`/`/dev/loop*`.
-- Before flashing, the decompressed image size is checked against the target device size; a
-  too-small card fails before `dd` starts.
-- `install`/`provision` verify that the target has `VARIANT_ID=installer` before running
-  `nixos-anywhere`; `--allow-non-installer` bypasses the check.
-- `provision --no-wait` stops after flashing and leaves the install command for later.
-- `--accept-flake-config` is opt-in; the CLI does not trust a target flake's `nixConfig` by
-  default.
+- `install` defaults to `--mode mount`; `provision` defaults to `--mode wipe`.
+  There is no silent destructive default in `install`.
+- `eeprom` copies a config to the target and applies it with
+  `rpi-eeprom-config --apply`. If the target lacks `rpi-eeprom-config`, it falls
+  back to `nix shell nixpkgs#raspberrypi-eeprom`. `--eeprom-config` on
+  `install`/`provision` applies the same config after the target is reachable
+  and before `nixos-anywhere` runs. EEPROM changes take effect on the next power
+  cycle.
+- `--ssh-key` is passed to both `nixos-anywhere` and the reachability wait;
+  `--ssh-port` and repeatable `--ssh-option` are forwarded too.
+- `--build-on auto|local|remote` is forwarded to `nixos-anywhere`. `auto` is the
+  default; `remote` builds the closure on the Pi, which is useful when the
+  workstation cannot build aarch64-linux.
+- `--wipe-nvme /dev/nvme0n1` runs `blkdiscard` on the target before installing;
+  use it after a previous ZFS pool. It only accepts NVMe device paths and
+  refuses `/dev/mmcblk*`/`/dev/loop*`.
+- Before flashing, the decompressed image size is checked against the target
+  device size; a too-small card fails before `dd` starts.
+- `install`/`provision` verify that the target has `VARIANT_ID=installer` before
+  running `nixos-anywhere`; `--allow-non-installer` bypasses the check.
+- `provision --no-wait` stops after flashing and leaves the install command for
+  later.
+- `--accept-flake-config` is opt-in; the CLI does not trust a target flake's
+  `nixConfig` by default.
 - `--` passes the remaining arguments to `nixos-anywhere`.
 - `NIXOS_ANYWHERE=/path/to/nixos-anywhere` overrides the pinned tool.
 
-The CLI is a `writeShellApplication` with `nixos-anywhere`, `zstd`, `openssh`, GNU
-coreutils/gawk/sed/grep, and (on Linux) util-linux pinned in its runtime closure. It works
-on macOS and Linux. Building the SD image still needs an aarch64-linux builder (or a Linux
-host); the CLI does not hide that. The Nix build output is rooted with an out-link until the
-command exits, so a concurrent GC cannot remove it mid-flash.
+The CLI is a `writeShellApplication` with `nixos-anywhere`, `zstd`, `openssh`,
+GNU coreutils/gawk/sed/grep, and (on Linux) util-linux pinned in its runtime
+closure. It works on macOS and Linux. Building the SD image still needs an
+aarch64-linux builder (or a Linux host); the CLI does not hide that. The Nix
+build output is rooted with an out-link until the command exits, so a concurrent
+GC cannot remove it mid-flash.
 
 ## Install playbooks
 
@@ -514,33 +549,34 @@ nix run .#pi5-image -- flash pi5-bootstrap.img /dev/rdisk4
 nix run .#pi5-image -- install --flake . --host rpi5-8gb --mode wipe root@<ip>
 ```
 
-No manual chroot or `switch-to-configuration boot` dance is needed. The SD card's partitions
-are declared in disko, so the bootloader install step writes into the SD card in the same
-run. With `--mode wipe`, nixos-anywhere uses disko's default destroy/create path: the NVMe
-is recreated and the SD is mounted for the bootloader install. The SD is disposable; reflash
-it if the install is interrupted. A soft reset uses `--mode mount` and only mounts both
-disks.
+No manual chroot or `switch-to-configuration boot` dance is needed. The SD
+card's partitions are declared in disko, so the bootloader install step writes
+into the SD card in the same run. With `--mode wipe`, nixos-anywhere uses disko's
+default destroy/create path: the NVMe is recreated and the SD is mounted for the
+bootloader install. The SD is disposable; reflash it if the install is
+interrupted. A soft reset uses `--mode mount` and only mounts both disks.
 
 ### NVMe-only install (SD only as installer)
 
 ```bash
 # One-time EEPROM change: NVMe first, SD fallback.
 nix run .#pi5-image -- eeprom \
-  --eeprom-config examples/nvme-boot/boot.conf root@<ip>
+  --eeprom-config eeprom/boot.conf root@<ip>
 
 # Install the host that uses nixosModules.nvme-boot.
 nix run .#pi5-image -- install --flake . --host rpi5-8gb-nvme --mode wipe root@<ip>
 ```
 
-The target host must use `nixosModules.nvme-boot` (or `default-nvme-boot`). Disko then only
-declares the NVMe's three partitions, so `nixos-anywhere` installs firmware, U-Boot,
-extlinux, the kernel, and the btrfs root all on the NVMe. There is no `sd-boot` module and
-the installer SD is not part of the mount set. The EEPROM change is separate because NixOS
-has no declarative EEPROM option; `provision ... --eeprom-config FILE` does it in one run.
+The target host must use `nixosModules.nvme-boot`. Disko then only declares the
+NVMe's three partitions, so `nixos-anywhere` installs firmware, U-Boot, extlinux,
+the kernel, and the btrfs root all on the NVMe. There is no `boot-sd` module and
+the installer SD is not part of the mount set. The EEPROM change is separate
+because NixOS has no declarative EEPROM option; `provision ... --eeprom-config
+FILE` does it in one run.
 
-After the install, power off and remove the SD card. The EEPROM order (`0xf416`) keeps SD as
-the fallback, and U-Boot's standard boot order scans MMC before NVMe, so an inserted
-installer SD still boots for recovery.
+After the install, power off and remove the SD card. The EEPROM order (`0xf416`)
+keeps SD as the fallback, and U-Boot's standard boot order scans MMC before NVMe,
+so an inserted installer SD still boots for recovery.
 
 ### Soft reset (SD reflash, NVMe preserved)
 
@@ -549,9 +585,9 @@ installer SD still boots for recovery.
 nix run .#pi5-image -- install --flake . --host rpi5-8gb --mode mount root@<ip>
 ```
 
-For an NVMe-only host, `--mode mount` preserves the NVMe content, but the installer SD must
-still be bootable; the EEPROM fallback or an inserted SD is what gets you back into the
-installer.
+For an NVMe-only host, `--mode mount` preserves the NVMe content, but the
+installer SD must still be bootable; the EEPROM fallback or an inserted SD is
+what gets you back into the installer.
 
 ### Recovery
 
@@ -565,264 +601,131 @@ installer.
 
 ## Hard-won details
 
-These are the non-obvious parts that make the design work. Keep them in mind before
-"simplifying" the modules.
+These are the non-obvious parts that make the design work. Keep them in mind
+before "simplifying" the modules.
 
 ### The bootloader-install caveat
 
-`nixos-anywhere` only auto-mounts filesystems that **disko** declares; it has no flag to
-mount arbitrary extra filesystems. If disko only knows about the NVMe, the bootloader install
-writes `extlinux.conf` and kernels into `@root/boot` on the NVMe instead of onto the SD card.
-The generation may boot once by luck, and then the next boot's impermanence reset deletes
-`@root` and the bootloader with it.
+`nixos-anywhere` only auto-mounts filesystems that **disko** declares; it has no
+flag to mount arbitrary extra filesystems. If disko only knows about the NVMe,
+the bootloader install writes `extlinux.conf` and kernels into `@root/boot` on
+the NVMe instead of onto the SD card. The generation may boot once by luck, and
+then the next boot's impermanence reset deletes `@root` and the bootloader with
+it.
 
-`pi5.sdBoot` describes the SD card's **existing** FAT + ext4 partitions. That makes
-`nixos-anywhere --disko-mode mount` mount both disks and lets the bootloader step succeed
-automatically. It is intended for mount mode; in create mode its `preCreateHook` verifies
-that the disk is already the expected two-partition MBR layout and aborts otherwise, so a
-blank or damaged SD is reflashed rather than silently repartitioned. `destroy = false` keeps
-the disk out of disko's destroy stage as well.
+`pi5.sdBoot` describes the SD card's **existing** FAT + ext4 partitions. That
+makes `nixos-anywhere --disko-mode mount` mount both disks and lets the
+bootloader step succeed automatically. It is intended for mount mode; in create
+mode its `preCreateHook` verifies that the disk is already the expected
+two-partition MBR layout and aborts otherwise, so a blank or damaged SD is
+reflashed rather than silently repartitioned. `destroy = false` keeps the disk
+out of disko's destroy stage as well.
 
 ### NVMe-only boot mechanics
 
-1. **U-Boot 2026.10 is required.** The flake pins a separate `nixpkgs-uboot` input and
-   applies Torsten Duwe's series (DMA-ranges parent walk, sandbox test, NVMe defconfig) plus
-   a follow-up that deletes `boot_targets` from `rpi.env`. The core driver fix is not in
-   U-Boot `master`/`next` as of 2026-10-31. The patches and provenance are in
-   `nix/patches/uboot/README.md`; `packages.aarch64-linux.uboot-nvme` exposes the build.
-2. **The EEPROM is not declarative.** Set `BOOT_ORDER=0xf416` (NVMe → SD → USB → restart) and
-   `PCIE_PROBE=1` for non-HAT+ adapters with
-   `sudo rpi-eeprom-config --apply examples/nvme-boot/boot.conf`, or
+1. **U-Boot 2026.10 is required.** The flake pins a separate `nixpkgs-uboot`
+   input and applies Torsten Duwe's series (DMA-ranges parent walk, sandbox
+   test, NVMe defconfig) plus a follow-up that deletes `boot_targets` from
+   `rpi.env`. The core driver fix is not in U-Boot `master`/`next` as of
+   2026-10-31. The patches and provenance are in `patches/uboot/README.md`;
+   `packages.aarch64-linux.uboot-nvme` exposes the build.
+2. **The EEPROM is not declarative.** Set `BOOT_ORDER=0xf416` (NVMe → SD → USB →
+   restart) and `PCIE_PROBE=1` for non-HAT+ adapters with
+   `sudo rpi-eeprom-config --apply eeprom/boot.conf`, or
    `pi5-image eeprom --eeprom-config FILE TARGET`.
-3. **Partition priorities are load-bearing.** disko creates partitions in priority order.
-   `firmware = 100`, `boot = 200`, `root = 9001`. Without the explicit priorities, `/boot`
-   takes the first 2 GiB and the 8 MiB..264 MiB firmware partition overlaps it.
-4. **`/boot` is ext4 and legacy-BIOS-bootable.** U-Boot's extlinux bootflow reads ext4, and
-   the GPT attribute bit 2 marks the partition bootable. Do not put `/boot` on btrfs.
-5. **U-Boot scans MMC before NVMe.** The v2 follow-up drops `boot_targets`, so bootstd uses
-   its standard priority order (mmc → nvme → usb → net). That is why an inserted installer SD
-   still wins for recovery. Remove the SD for normal NVMe-only boots; if you want NVMe to win
-   even with a bootable SD inserted, use the older `boot_targets=nvme mmc ...` shape and
-   accept that the SD installer no longer takes precedence.
-6. **No `sd-boot` module.** The NVMe-only layout declares `/boot` and `/boot/firmware` from
-   the NVMe, so `nixos-anywhere` mounts them from the target disk. Adding `sd-boot` as well
-   would give disko two `/boot` definitions and is rejected by an assertion.
-7. **The hardware proof used `resetRoot = false`.** The 2026-10-30 4 GB bring-up disabled the
-   per-boot `@root` reset to isolate the boot-chain change. The root wipe only touches the
-   btrfs partition, but re-enable it deliberately and verify that `/boot`, `/nix`, and
-   `/persist` survive.
+3. **Partition priorities are load-bearing.** disko creates partitions in
+   priority order. `firmware = 100`, `boot = 200`, `root = 9001`. Without the
+   explicit priorities, `/boot` takes the first 2 GiB and the 8 MiB..264 MiB
+   firmware partition overlaps it.
+4. **`/boot` is ext4 and legacy-BIOS-bootable.** U-Boot's extlinux bootflow reads
+   ext4, and the GPT attribute bit 2 marks the partition bootable. Do not put
+   `/boot` on btrfs.
+5. **U-Boot scans MMC before NVMe.** The v2 follow-up drops `boot_targets`, so
+   bootstd uses its standard priority order (mmc → nvme → usb → net). That is why
+   an inserted installer SD still wins for recovery. Remove the SD for normal
+   NVMe-only boots; if you want NVMe to win even with a bootable SD inserted, use
+   the older `boot_targets=nvme mmc ...` shape and accept that the SD installer
+   no longer takes precedence.
+6. **No `boot-sd` module in the NVMe-only stack.** The NVMe-only layout declares
+   `/boot` and `/boot/firmware` from the NVMe, so `nixos-anywhere` mounts them
+   from the target disk. Adding `boot-sd` as well would give disko two `/boot`
+   definitions and is rejected by an assertion.
+7. **The hardware proof used `resetRoot = false`.** The 2026-10-30 4 GB bring-up
+   disabled the per-boot `@root` reset to isolate the boot-chain change. The root
+   wipe only touches the btrfs partition, but re-enable it deliberately and
+   verify that `/boot`, `/nix`, and `/persist` survive.
 
 ### Root-wipe mechanics
 
-`boot.initrd.systemd.services.root-wipe` runs before `sysroot.mount`, deletes `@root`, and
-recreates it empty. Several details are load-bearing:
+`boot.initrd.systemd.services.root-wipe` runs before `sysroot.mount`, deletes
+`@root`, and recreates it empty. Several details are load-bearing:
 
-1. **`RemainAfterExit = true` is required.** Without it, systemd started the unit twice per
-   boot. Two near-simultaneous mount + delete/create sequences against the same btrfs device
-   reliably hung the entire boot with no further console output.
-2. **Mount the top level with `subvol=/`.** Mounting the filesystem's default subvolume
-   would make `/btrfs_tmp/@root` resolve inside that subvolume instead of the top level.
-3. **Fail closed.** The unit is `RequiredBy=sysroot.mount`, not merely wanted, so a failed
-   wipe stops the boot instead of mounting a partially wiped root.
+1. **`RemainAfterExit = true` is required.** Without it, systemd started the unit
+   twice per boot. Two near-simultaneous mount + delete/create sequences against
+   the same btrfs device reliably hung the entire boot with no further console
+   output.
+2. **Mount the top level with `subvol=/`.** Mounting the filesystem's default
+   subvolume would make `/btrfs_tmp/@root` resolve inside that subvolume instead
+   of the top level.
+3. **Fail closed.** The unit is `RequiredBy=sysroot.mount`, not merely wanted, so
+   a failed wipe stops the boot instead of mounting a partially wiped root.
 4. **Delete nested subvolumes first, to a fixed point.** systemd auto-creates
-   `@root/srv`, `@root/var/lib/portables`, `@root/var/lib/machines`, `@root/tmp`, and
-   `@root/var/tmp` on first boot. `btrfs subvolume list` is parent-first, so the script
-   repeats deletion passes until no more progress is made. The child list lives in
-   `/run`, not on the btrfs top level.
-5. **The initrd shell has no `awk`.** It also does not reliably support bash arrays or
-   process substitution. The module parses `btrfs subvolume list` with a POSIX `while read`
-   loop; do not replace it with a "nicer" pipeline.
-6. **Do not mark `/boot` or `/boot/firmware` `neededForBoot`.** U-Boot has already loaded
-   the kernel and initrd before Linux starts. Forcing initrd to probe SD/MMC while NVMe PCIe
-   enumeration is happening contributed to early-boot hangs.
-7. **Assertions guard the catastrophic cases:** `@nix` must mount at `/nix`, exactly one
-   subvolume must mount at `/`, and the persist/snapshot mounts must be declared btrfs
-   filesystems.
+   `@root/srv`, `@root/var/lib/portables`, `@root/var/lib/machines`, `@root/tmp`,
+   and `@root/var/tmp` on first boot. `btrfs subvolume list` is parent-first, so
+   the script repeats deletion passes until no more progress is made. The child
+   list lives in `/run`, not on the btrfs top level.
+5. **The initrd shell has no `awk`.** It also does not reliably support bash
+   arrays or process substitution. The module parses `btrfs subvolume list` with
+   a POSIX `while read` loop; do not replace it with a "nicer" pipeline.
+6. **Do not mark `/boot` or `/boot/firmware` `neededForBoot`.** U-Boot has already
+   loaded the kernel and initrd before Linux starts. Forcing initrd to probe
+   SD/MMC while NVMe PCIe enumeration is happening contributed to early-boot
+   hangs.
+7. **Assertions guard the catastrophic cases:** `@nix` must mount at `/nix`,
+   exactly one subvolume must mount at `/`, and the persist/snapshot mounts must
+   be declared btrfs filesystems. `checks.assertions` matches their messages, so
+   a renamed option cannot silently disable a guard.
 
 ### Vendor kernel and module closure
 
 The profile's vendor kernel is deliberate; see the architecture section. The
-`makeModulesClosure` overlay with `allowMissing = true` is also required: the initrd wants
-modules the vendor kernel fork does not build. This is independent of
-`hardware.enableAllHardware`.
+`makeModulesClosure` overlay with `allowMissing = true` is also required: the
+initrd wants modules the vendor kernel fork does not build. This is independent
+of `hardware.enableAllHardware`.
 
 ### disko's legacy-table warning
 
-Evaluating any host prints disko's "legacy table is outdated" warning for the SD card. The
-SD is MBR/msdos, and disko's newer `gpt` type addresses partitions by GPT partlabel, so it
-cannot describe this disk. disko offers no way to silence just this warning
-(nix-community/disko#812). It is harmless because the SD description is mount-only.
+Evaluating any host prints disko's "legacy table is outdated" warning for the SD
+card. The SD is MBR/msdos, and disko's newer `gpt` type addresses partitions by
+GPT partlabel, so it cannot describe this disk. disko offers no way to silence
+just this warning (nix-community/disko#812). It is harmless because the SD
+description is mount-only.
 
 ### No kexec / root SSH on the installer
 
 `nixos-anywhere` hardcodes root SSH for targets with `system.nixos.variant_id =
-"installer"`, and there is no flag to override it. The installer therefore allows root SSH
-with keys. This is acceptable because the image is throwaway and reflashed before every use.
-Skipping kexec (for Pi 5 stability) and disabling root SSH on the installer are mutually
-exclusive.
+"installer"`, and there is no flag to override it. The installer therefore
+allows root SSH with keys. This is acceptable because the image is throwaway and
+reflashed before every use. Skipping kexec (for Pi 5 stability) and disabling
+root SSH on the installer are mutually exclusive.
 
 ### Unchecked hardware assumptions
 
-- U-Boot v2026.10's stock `rpi_arm64_defconfig` still lacks NVMe support, and the DMA-ranges
-  parent-walk fix is not in U-Boot `master` or `next` as of 2026-10-31. The NVMe-only path
-  therefore carries the patch set in `nix/patches/uboot/` and a secondary `nixpkgs-uboot`
-  pin. Remove both once a U-Boot release includes the fixes.
-- Some M.2 HATs have NVMe adapter/EEPROM quirks. The 4 GB proof used a non-HAT+ adapter that
-  needed `PCIE_PROBE=1` and `dtparam=pciex1`; HAT+ carriers may not. Validate on your carrier.
-- The 8 GB production board has not been migrated to the NVMe-only layout. The hardware proof
-  is on a disposable 4 GB board; treat a first install from this repository as a bring-up.
+- U-Boot v2026.10's stock `rpi_arm64_defconfig` still lacks NVMe support, and the
+  DMA-ranges parent-walk fix is not in U-Boot `master` or `next` as of
+  2026-10-31. The NVMe-only path therefore carries the patch set in
+  `patches/uboot/` and a secondary `nixpkgs-uboot` pin. Remove both once a U-Boot
+  release includes the fixes.
+- Some M.2 HATs have NVMe adapter/EEPROM quirks. The 4 GB proof used a non-HAT+
+  adapter that needed `PCIE_PROBE=1` and `dtparam=pciex1`; HAT+ carriers may not.
+  Validate on your carrier.
+- The 8 GB board has not been migrated to the NVMe-only layout. The hardware
+  proof is on a disposable 4 GB board; treat a first install from this repository
+  as a bring-up.
 - Use the 27 W USB-C PSU and active cooling for sustained load on either board.
-- The vendor kernel is not in a public Hydra jobset. A `nix flake update` that bumps
-  `nixos-hardware` can mean a long local `linux-rpi` build; update inputs deliberately and
-  warm your binary cache.
-
-## Reusing this in `nix-homelab-hosts`
-
-The original project keeps its application modules; only the Pi/NVMe/boot layer moves here.
-Concretely:
-
-### Add the input and re-export the CLI
-
-```nix
-inputs.pi5 = {
-  url = "path:../nixos-raspberry-pi-5"; # or github:esselius/nixos-raspberry-pi-5
-  inputs.nixpkgs.follows = "nixpkgs";
-};
-
-# Optional, so `nix run .#pi5-image` works from the original repo:
-packages.aarch64-darwin.pi5-image =
-  inputs.pi5.packages.aarch64-darwin.pi5-image;
-```
-
-The original can then drop its `nixos-hardware`, `disko`, and `impermanence` inputs if they
-are not used elsewhere. `sops-nix` stays.
-
-### Main hosts
-
-Replace the contents of the old Pi/storage imports in `flake.nix`:
-
-```nix
-mainHostModules = [
-  inputs.pi5.nixosModules.default-sd-boot
-  ./modules/nix-settings.nix
-  ./modules/ssh-access.nix
-  ./modules/site.nix
-  ./modules/wireguard.nix
-  ./modules/dns.nix
-  ./modules/incus
-  ./modules/sops.nix
-  ./modules/monitoring-agent.nix
-  ./modules/cgroup-metrics.nix
-  ./modules/nvme-wear.nix
-  ./modules/nix-cache.nix
-  ./modules/pki.nix
-  ./modules/storage.nix   # now only project-specific additions
-];
-```
-
-`mkHost (mainHostModules ++ [ ./hosts/rpi5-8gb.nix ])` stays as it is. This preserves the
-SD-boot behavior. The boot path is now explicit: use `default-nvme-boot` instead if you want
-firmware + U-Boot + `/boot` on the NVMe, and do not import both. For the NVMe-only path, add
-the board's PCIe setting (for a non-HAT+ adapter) and apply the EEPROM config from
-`examples/nvme-boot/boot.conf` before installing.
-
-Delete:
-
-- `modules/raspberry-pi.nix` (vendor profile, overlay, firmware),
-- `disko-nvme.nix` (NVMe layout),
-- `disko-sd.nix` (SD mount description),
-- the `disko.nixosModules.disko` and `impermanence.nixosModules.impermanence` imports.
-
-Trim `modules/storage.nix` to only the application-specific persistence additions. The
-root-wipe service, fstrim, auto-scrub, snapper config, and the `/persist/.snapshots` bind
-mount now come from `pi5.impermanence`. Snapshots are opt-in in the extracted base stack,
-so the original explicitly enables them to preserve its behavior:
-
-```nix
-{ ... }:
-{
-  pi5.impermanence = {
-    snapshots.enable = true;
-    extraDirectories = [
-      "/var/lib/incus"
-      "/var/lib/unbound"
-    ];
-  };
-}
-```
-
-`/var/lib/nixos`, `/var/log`, the machine-id, and the SSH host keys are already defaults, so
-they do not need to be repeated. Use `extraFiles` for additional files. `hosts/rpi5-8gb.nix`
-and `hosts/rpi5-4gb.nix` do not need changes.
-
-### Bootstrap installer
-
-Replace `hosts/rpi5-bootstrap.nix` with `mkPi5Installer`. Keep the project SSH settings by
-reusing `ssh-access.nix`, and set `site.permitRootLogin` to `"prohibit-password"` (the
-installer module defaults to that, but `ssh-access.nix` would otherwise set it to `"no"`):
-
-```nix
-rpi5-bootstrap = inputs.pi5.lib.mkPi5Installer {
-  hostName = "rpi5-bootstrap";
-  # sshAuthorizedKeys can be omitted here because ssh-access.nix already
-  # supplies the root/admin keys from site.sshPublicKey.
-  extraModules = [
-    ./modules/nix-settings.nix
-    ./modules/ssh-access.nix
-    {
-      system.stateVersion = "26.05";
-      site.permitRootLogin = "prohibit-password";
-    }
-  ];
-};
-```
-
-The old bootstrap-specific settings (`variant_id`, `sdImage.firmwareSize`,
-`rootVolumeLabel`, the resize hook, autologin, ZFS off, vim) are all in the installer module.
-`images.rpi5-bootstrap` can keep pointing at
-`config.system.build.sdImage`.
-
-### Taskfile
-
-The CLI replaces the shell in `bootstrap`, `flash`, `install`, and `install:mount`; the
-`HOST`/`IP` inventory resolution stays in the project:
-
-```yaml
-bootstrap:
-  cmds:
-    - nix run .#pi5-image -- build --flake . --installer rpi5-bootstrap --output {{.BOOTSTRAP_IMAGE}} --force
-
-flash:
-  cmds:
-    - nix run .#pi5-image -- flash {{.BOOTSTRAP_IMAGE}} {{.DISK}} --yes
-
-install:
-  cmds:
-    - |
-      ip="$(scripts/host-ip.sh "{{.HOST}}" "{{.IP}}")"
-      nix run .#pi5-image -- install --flake . --host "{{.HOST}}" --mode wipe --yes "root@$ip"
-
-install:mount:
-  cmds:
-    - |
-      ip="$(scripts/host-ip.sh "{{.HOST}}" "{{.IP}}")"
-      nix run .#pi5-image -- install --flake . --host "{{.HOST}}" --mode mount --yes "root@$ip"
-```
-
-Keep the existing `CONFIRM=WIPE|MOUNT|FLASH` gating if you want it; the CLI independently
-requires `--yes` or an interactive confirmation. `install` is the hard reset (it recreates
-the NVMe and reinstalls the bootloader on the selected boot medium, SD or NVMe);
-`install:mount` preserves both. Keep the original dirty-worktree guard and `nix flake check`
-before the CLI call; only the `nixos-anywhere` invocation changes.
-
-For the NVMe-only path, add an EEPROM step before the first install:
-
-```bash
-nix run .#pi5-image -- eeprom \
-  --eeprom-config examples/nvme-boot/boot.conf "root@$ip"
-```
-
-or pass `--eeprom-config examples/nvme-boot/boot.conf` to `install`/`provision`.
+- The vendor kernel is not in a public Hydra jobset. A `nix flake update` that
+  bumps `nixos-hardware` can mean a long local `linux-rpi` build; update inputs
+  deliberately and warm your binary cache.
 
 ## Development
 
@@ -834,17 +737,18 @@ nix build .#pi5-image
 nix run .#pi5-image -- --help
 ```
 
-`nix flake check` evaluates every `nixosConfiguration` (including the SD and NVMe-only
-examples), the installer image derivation, and the negative assertion tests, but does not
-build the aarch64-linux system or image. Build those with an aarch64-linux builder:
+`nix flake check` evaluates the demo installer, the two stack configurations the
+`checks` build for assertion testing, and the negative assertion cases, but does
+not build the aarch64-linux system or image. Build those with an aarch64-linux
+builder:
 
 ```bash
 nix build .#images.pi5-bootstrap
-nix build .#nixosConfigurations.pi5-nvme-example.config.system.build.toplevel
 nix build .#checks.aarch64-linux.uboot-nvme
 ```
 
-`packages.aarch64-linux.uboot-nvme` exposes the patched U-Boot for manual inspection:
+`packages.aarch64-linux.uboot-nvme` exposes the patched U-Boot for manual
+inspection:
 
 ```bash
 nix build .#packages.aarch64-linux.uboot-nvme
@@ -853,64 +757,39 @@ strings result/u-boot.bin | grep -E '^boot_targets=|preboot=|U-Boot 2026'
 
 ### Verification status
 
-This extraction has been checked in several ways:
-
-- `nix flake check` passes on an Apple Silicon macOS host (eval-all, formatting, shellcheck,
-  the `pi5-image` wrapper build, and the assertion tests). The same checks evaluate for
-  `aarch64-linux`; `checks.aarch64-linux.uboot-nvme` builds and passes there.
-- `nix build .#nixosConfigurations.pi5-nvme-example.config.system.build.toplevel` completed
-  through the aarch64-linux builder. The evaluated layout is the three-partition NVMe-only
-  one (`FIRMWARE` on `/boot/firmware`, `NIXOS_BOOT` on `/boot`, `NVME_ROOT` on `/`), with
-  U-Boot 2026.10 and `configurationLimit = 8`.
+- `nix flake check` passes on an Apple Silicon macOS host (eval-all, formatting,
+  shellcheck, the `pi5-image` wrapper build, and the assertion cases). The same
+  checks evaluate for `aarch64-linux`; `checks.aarch64-linux.uboot-nvme` builds
+  and passes there.
+- `nix build .#images.pi5-bootstrap` completed through an aarch64-linux builder:
+  a 4.26 GiB raw image, 1.41 GiB compressed. The FAT partition contains the Pi 5
+  DTBs, `u-boot.bin`, and a `config.txt` with `kernel=u-boot.bin` and
+  `arm_64bit=1`; the ext4 partition contains `extlinux.conf` pointing at the
+  vendor `linux-rpi` kernel and initrd (6.18.50 at extraction time).
 - The patched U-Boot derivation is the same one tested on hardware in
-  `2026-10-30-rpi5-bootloader` (`uboot-rpi_arm64_defconfig-2026.10`, including the
-  DMA-ranges parent walk and the `boot_targets`-removal follow-up). `strings` shows
-  `preboot=pci enum; usb start; nvme scan;` and no `boot_targets=` line.
-- `nix build .#images.pi5-bootstrap` completed through an aarch64-linux builder: a 4.26 GiB
-  raw image, 1.41 GiB compressed. The FAT partition contains the Pi 5 DTBs, `u-boot.bin`,
-  and a `config.txt` with `kernel=u-boot.bin` and `arm_64bit=1`; the ext4 partition contains
-  `extlinux.conf` pointing at the vendor `linux-rpi` kernel and initrd (6.18.50 at
-  extraction time).
-- `nix-homelab-hosts` was migrated on branch `pi5-extract` using the steps in this README.
-  All three configurations (`rpi5-8gb`, `rpi5-4gb`, `rpi5-bootstrap`) evaluate and
-  `nix flake check` passes. The migration preserved the original layout, kernel, firmware,
-  persistence, installer `sdImage`, SSH settings, and `variant_id`. The later hardening
-  pass intentionally changes a few details: `/boot` and the firmware partition mount by
-  label, the SD create path is guarded, the root wipe is fail-closed, snapshot yearly
-  retention defaults to 0, and the installer no longer duplicates the `wheel` group.
-- The consumer API was tested with `inputs.pi5.nixosModules.default-sd-boot`,
-  `inputs.pi5.nixosModules.default-nvme-boot`, `inputs.pi5.nixosModules.<granular>`, and
-  `inputs.pi5.lib.mkPi5Installer`, including
-  `inputs.pi5.inputs.nixpkgs.follows = "nixpkgs"`.
+  `2026-10-30-rpi5-bootloader` (`uboot-rpi_arm64_defconfig-2026.10`, including
+  the DMA-ranges parent walk and the `boot_targets`-removal follow-up).
+  `strings` shows `preboot=pci enum; usb start; nvme scan;` and no
+  `boot_targets=` line.
+- The SD-boot design and the individual mechanics were verified on real hardware
+  in the source project: vendor kernel boot with RP1 (USB + Ethernet) alive,
+  NVMe enumerated on PCIe, the full impermanence mount tree, the root-wipe
+  `RemainAfterExit` fix across consecutive clean reboots, `nixos-anywhere` hard
+  reset and `--disko-mode mount` soft reset, and a `/` marker disappearing after
+  reboot while the `/persist` marker survived.
+- The NVMe-only chain was verified on a disposable 4 GB board in
+  `2026-10-30-rpi5-bootloader`: EEPROM `BOOT_ORDER=0xf416`, `PCIE_PROBE=1`,
+  `dtparam=pciex1`; SD removed, firmware `Boot mode: NVME (06)`, U-Boot booted
+  `nvme#0.blk#1.bootdev.part_2` with extlinux, root on NVMe btrfs, no failed
+  units; a generation switch and rollback survived reboot; with the installer SD
+  inserted U-Boot booted `mmc@fff000.bootdev.part_2` and the installer, proving
+  the recovery path.
 
-The SD-boot design and the individual mechanics were verified on real hardware in the
-source project, including:
-
-- vendor kernel boot, RP1 (USB + Ethernet) alive, NVMe enumerated on PCIe;
-- the full impermanence mount tree and the root-wipe `RemainAfterExit` fix, with consecutive
-  clean reboots and no failed units;
-- `nixos-anywhere` hard reset and `--disko-mode mount` soft reset, including an automatic
-  bootloader install into the SD card and a reboot into the working system;
-- a marker file on `/` disappearing after reboot while the `/persist` marker survived.
-
-The NVMe-only chain was verified on a disposable 4 GB board in
-`2026-10-30-rpi5-bootloader`:
-
-- EEPROM `BOOT_ORDER=0xf416`, `PCIE_PROBE=1`, `dtparam=pciex1`;
-- SD removed: firmware `Boot mode: NVME (06)`, U-Boot booted
-  `nvme#0.blk#1.bootdev.part_2` with extlinux, root on NVMe btrfs, no failed units;
-- a generation switch and rollback survived reboot;
-- installer SD inserted: U-Boot booted `mmc@fff000.bootdev.part_2` and the installer
-  (`VARIANT_ID=installer`), proving the recovery path;
-- the v2 `boot_targets` removal was tested with the SD removed and with the installer SD
-  inserted.
-
-The extracted modules themselves have not yet been booted on hardware. Treat a first install
-from this repository as a bring-up test, and keep the source project's verification
-checklist for the application layer.
+**The extracted modules have not yet been booted on hardware.** Treat a first
+install from this repository as a bring-up test.
 
 ## Out of scope
 
-Deliberately left in `nix-homelab-hosts`: incus, WireGuard, Unbound/DNS, sops, the caching
-layer, Grafana Alloy, the NVMe SMART wear collector, and the host inventory/Taskfile
-conveniences. Those are application or fleet concerns, not the Pi 5 + NVMe boot layer.
+Application workloads: incus, WireGuard, Unbound/DNS, sops, the caching layer,
+Grafana Alloy, the NVMe SMART wear collector, and host inventory conveniences.
+Those are application or fleet concerns, not the Pi 5 + NVMe boot layer.
