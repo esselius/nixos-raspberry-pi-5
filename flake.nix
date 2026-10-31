@@ -1,5 +1,5 @@
 {
-  description = "NixOS on Raspberry Pi 5 with an NVMe root: reusable modules plus an imaging/provisioning CLI";
+  description = "NixOS on Raspberry Pi 5 with an NVMe root: reusable modules plus a throwaway SD-card installer";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
