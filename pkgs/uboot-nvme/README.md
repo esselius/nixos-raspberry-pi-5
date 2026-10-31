@@ -1,5 +1,9 @@
 # U-Boot Raspberry Pi 5 NVMe patches
 
+`default.nix` builds U-Boot 2026.10 from the `nixpkgs-uboot` pin with the
+patches in this directory. `torsten/` is Torsten Duwe's upstream series; the
+file at the top level is a local follow-up. Provenance for each is below.
+
 These patches enable NVMe boot on the Raspberry Pi 5 with U-Boot 2026.10. They
 are a temporary bridge until the fixes reach the U-Boot release used by the
 pinned nixpkgs. Do not present them as original work.

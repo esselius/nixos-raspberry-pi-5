@@ -30,7 +30,7 @@ flowchart LR
 | `modules/lib/labels.nix` | Partition labels and SD geometry shared by the image and the hosts. |
 | `modules/root-wipe.sh` | The initrd script that resets `@root`. |
 | `pkgs/pi5-image.nix`, `scripts/pi5-image.sh` | The CLI: a `writeShellApplication` wrapper and its script. |
-| `pkgs/uboot-nvme.nix`, `patches/uboot/` | Patched U-Boot 2026.10 and the provenance of every patch. |
+| `pkgs/uboot-nvme/` | Patched U-Boot 2026.10 and the provenance of every patch. |
 | `eeprom/` | The non-declarative Pi 5 bootloader configuration. |
 | `flake.nix` | The public surface: modules, `mkPi5Installer`, the CLI, the demo image. |
 
@@ -118,7 +118,7 @@ flowchart LR
   uses stock nixpkgs + `nixos-hardware` firmware staging. The NVMe path needs
   U-Boot 2026.10 with Torsten Duwe's DMA-ranges parent-walk fix and NVMe
   config, plus a `boot_targets` follow-up. Those patches are carried in
-  `patches/uboot/` and are expected to be dropped once U-Boot ships them.
+  `pkgs/uboot-nvme/` and are expected to be dropped once U-Boot ships them.
 
 ### Design decisions
 
@@ -423,7 +423,7 @@ firmware path is `/boot/firmware`.
 The flake's `nixosModules.boot-nvme` wrapper sets `ubootPackage` to
 `packages.aarch64-linux.uboot-nvme`; direct importers of `modules/boot/nvme.nix`
 must set it themselves. The package is built from the `nixpkgs-uboot` input and
-the patches in `patches/uboot/`.
+the patches in `pkgs/uboot-nvme/`.
 
 ### `pi5.impermanence`
 
@@ -586,7 +586,7 @@ out of disko's destroy stage as well.
    input and applies Torsten Duwe's series (DMA-ranges parent walk, sandbox
    test, NVMe defconfig) plus a follow-up that deletes `boot_targets` from
    `rpi.env`. The core driver fix is not in U-Boot `master`/`next` as of
-   2026-10-31. The patches and provenance are in `patches/uboot/README.md`;
+   2026-10-31. The patches and provenance are in `pkgs/uboot-nvme/README.md`;
    `packages.aarch64-linux.uboot-nvme` exposes the build.
 2. **The EEPROM is not declarative.** Set `BOOT_ORDER=0xf416` (NVMe → SD → USB →
    restart) and `PCIE_PROBE=1` for non-HAT+ adapters with
@@ -673,7 +673,7 @@ root SSH on the installer are mutually exclusive.
 - U-Boot v2026.10's stock `rpi_arm64_defconfig` still lacks NVMe support, and the
   DMA-ranges parent-walk fix is not in U-Boot `master` or `next` as of
   2026-10-31. The NVMe-only path therefore carries the patch set in
-  `patches/uboot/` and a secondary `nixpkgs-uboot` pin. Remove both once a U-Boot
+  `pkgs/uboot-nvme/` and a secondary `nixpkgs-uboot` pin. Remove both once a U-Boot
   release includes the fixes.
 - Some M.2 HATs have NVMe adapter/EEPROM quirks. The 4 GB proof used a non-HAT+
   adapter that needed `PCIE_PROBE=1` and `dtparam=pciex1`; HAT+ carriers may not.

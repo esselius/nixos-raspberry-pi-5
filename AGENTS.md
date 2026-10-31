@@ -24,7 +24,7 @@ the things that break the repo if you change them.
 
 - **Bump the main `nixpkgs` pin to get a newer U-Boot.** The NVMe-only path needs
   U-Boot 2026.10+, built from the separate `nixpkgs-uboot` input with the patches
-  in `patches/uboot/`. Newer `nixos-unstable` removed
+  in `pkgs/uboot-nvme/`. Newer `nixos-unstable` removed
   `boot.initrd.systemd.enable`, which `pi5.impermanence` still uses. Keep the
   patch provenance notes; drop the patches and the input once U-Boot ships them.
 - **Move `/boot` onto the btrfs root.** It must stay ext4 (or FAT) and

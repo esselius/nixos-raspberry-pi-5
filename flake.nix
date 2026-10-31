@@ -53,8 +53,8 @@
 
       # U-Boot 2026.10 with Torsten Duwe's NVMe series and the boot_targets
       # removal follow-up. The patches and their provenance are documented in
-      # patches/uboot/README.md.
-      ubootNvme = nixpkgs-uboot.legacyPackages.aarch64-linux.callPackage ./pkgs/uboot-nvme.nix { };
+      # pkgs/uboot-nvme/README.md.
+      ubootNvme = nixpkgs-uboot.legacyPackages.aarch64-linux.callPackage ./pkgs/uboot-nvme { };
 
       bootstrap = self.lib.mkPi5Installer {
         sshAuthorizedKeys = [ demoTestSshKey ];
