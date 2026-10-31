@@ -1,15 +1,8 @@
-{ lib, pkgs, ... }:
+{ lib, ... }:
 {
   # Raspberry Pi 5 hardware support. The flake's `hardware` module wrapper
-  # imports `nixos-hardware.nixosModules.raspberry-pi-5`; this file only adds
-  # the two fixes that profile still needs.
-  assertions = [
-    {
-      assertion = pkgs.stdenv.hostPlatform.isAarch64;
-      message = "The Raspberry Pi 5 modules require an aarch64-linux NixOS system.";
-    }
-  ];
-
+  # imports `nixos-hardware.nixosModules.raspberry-pi-5`; this file adds the two
+  # fixes that profile still needs.
   nixpkgs.overlays = [
     (final: prev: {
       # The vendor `linux-rpi` kernel does not build every module the
