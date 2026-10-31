@@ -183,32 +183,10 @@
 
       packages = nixpkgs.lib.genAttrs systems (
         system:
-        let
-          pkgs = nixpkgs.legacyPackages.${system};
-          pi5-image = pkgs.callPackage ./pkgs/pi5-image.nix { };
-        in
-        {
-          inherit pi5-image;
-          # Re-export the pinned installer so consumers can use this flake as
-          # their only source of nixos-anywhere.
-          nixos-anywhere = pkgs.nixos-anywhere;
-          default = pi5-image;
-        }
-        // nixpkgs.lib.optionalAttrs (system == "aarch64-linux") {
+        nixpkgs.lib.optionalAttrs (system == "aarch64-linux") {
           # The patched U-Boot used by nixosModules.nvme-boot. Exposed for
           # inspection (`strings .../u-boot.bin`) and manual testing.
           uboot-nvme = ubootNvme;
-        }
-      );
-
-      apps = perSystem (
-        system: _: {
-          pi5-image = {
-            type = "app";
-            program = "${self.packages.${system}.pi5-image}/bin/pi5-image";
-            meta.description = "Build, flash, and install NixOS on a Raspberry Pi 5 with an NVMe root";
-          };
-          default = self.apps.${system}.pi5-image;
         }
       );
 
@@ -415,10 +393,6 @@
           ];
         in
         {
-          # Cross-system check that the CLI wrapper still builds (and passes
-          # shellcheck) on this platform.
-          pi5-image = self.packages.${system}.pi5-image;
-
           # Negative tests for the assertions that prevent data loss.
           assertions = pkgs.runCommand "assertions" { } (
             if failedCases == [ ] then
@@ -462,7 +436,7 @@
               }
               ''
                 cd "$src"
-                shellcheck modules/*.sh scripts/*.sh
+                shellcheck modules/*.sh
                 touch $out
               '';
         }

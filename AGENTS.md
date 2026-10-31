@@ -1,60 +1,62 @@
 # Maintenance notes
 
 This repo is the Raspberry Pi 5 + NVMe bring-up layer: boot chain, disko
-layouts, impermanence, and the imaging CLI. It deliberately contains no
-application workloads and no host configurations; hosts live in the consuming
-flake. `README.md` explains the design and the mechanics — this file lists only
-the things that break the repo if you change them.
+layouts, impermanence. It holds no application workloads and no host
+configurations; hosts live in the consuming flake. `README.md` explains the
+design, the commands, and the mechanics. This file holds the invariants — the
+things that break the repo if they change.
+
+There is no imaging CLI. `README.md` "Quick start" is the source of truth for
+build (`nix build .#images.<name>`), flash (`zstd -dc | dd`), and install
+(`nixos-anywhere --disko-mode disko|mount`).
 
 ## Shape
 
 - `modules/base.nix` is the stack without a boot medium. `sd-boot` and
-  `nvme-boot` are the two full stacks and are named after the boot medium they
-  choose. There is no default boot path. Snapper stays opt-in (site policy).
-- The flake wrappers — not the module files — import `nixos-hardware`, `disko`,
-  and `impermanence`. Keep it that way so consumers never pass `inputs` through
-  `specialArgs`.
-- `modules/lib/labels.nix` is the single definition of the partition labels and
-  SD geometry. The installer image and the hosts read it; do not reintroduce a
-  literal label or geometry value in a module.
-- `scripts/pi5-image.sh` is orchestration only. Disk layout, boot chain, and
-  persistence stay declarative in `modules/`.
+  `nvme-boot` are the two full stacks, named after the boot medium they choose.
+  There is no default boot path. Snapper stays opt-in.
+- The flake wrappers, not the module files, import `nixos-hardware`, `disko`,
+  and `impermanence`, so consumers never pass `inputs` through `specialArgs`.
+- `modules/lib/labels.nix` is the only definition of the partition labels and SD
+  geometry; every module reads it.
+- `pkgs/uboot-nvme/` holds the U-Boot derivation, its patches, and their
+  provenance in one place.
 
-## Do not
+## Invariants
 
-- **Bump the main `nixpkgs` pin to get a newer U-Boot.** The NVMe-only path needs
-  U-Boot 2026.10+, built from the separate `nixpkgs-uboot` input with the patches
-  in `pkgs/uboot-nvme/`. Newer `nixos-unstable` removed
-  `boot.initrd.systemd.enable`, which `pi5.impermanence` still uses. Keep the
-  patch provenance notes; drop the patches and the input once U-Boot ships them.
-- **Move `/boot` onto the btrfs root.** It must stay ext4 (or FAT) and
-  legacy-BIOS-bootable. The disko priorities (`firmware=100`, `boot=200`,
-  `root=9001`) and the `boot_targets`-removal U-Boot shape were found
-  empirically.
-- **Switch the kernel to mainline** without testing RP1 (USB + Ethernet) on
-  hardware. The vendor kernel is the supported pairing for the firmware DTBs.
-- **Drop `system.nixos.variant_id = "installer"`** from the installer module: it
-  skips flaky Pi 5 kexec. Root SSH with keys is required by `nixos-anywhere`
-  (it hardcodes root for installer targets), so the two go together. This is why
-  the flake exports no installer image: a real one needs real keys.
-- **Let the SD card be repartitioned.** The SD description is guarded, not merely
-  `destroy = false`: its `preCreateHook` refuses to create a partition table or
-  `mkfs` on anything that is not the expected two-partition MBR layout with the
-  `FIRMWARE`/`NIXOS_BOOT` labels.
-- **Relax the root-wipe service.** Keep `RemainAfterExit`, `subvol=/`, the
-  fail-closed `RequiredBy`, fixed-point nested-subvolume deletion, no
-  awk/arrays/process substitution, and no `neededForBoot` on `/boot` or
-  `/boot/firmware`. Every one of those was found empirically; see README
+- **The main `nixpkgs` pin stays put.** U-Boot comes from the `nixpkgs-uboot`
+  input plus `pkgs/uboot-nvme/`. Newer `nixos-unstable` removed
+  `boot.initrd.systemd.enable`, which `pi5.impermanence` uses. Drop the patches
+  and the extra input when U-Boot ships them.
+- **`/boot` stays ext4 (or FAT) and legacy-BIOS-bootable**, never on the btrfs
+  root. The disko priorities (`firmware=100`, `boot=200`, `root=9001`) and the
+  `boot_targets`-removal U-Boot shape were found empirically.
+- **The vendor `linux-rpi` kernel stays.** Mainline plus the vendor DTBs broke
+  RP1 (USB + Ethernet) with `-22`/EINVAL; test RP1 on hardware before changing
+  it.
+- **`system.nixos.variant_id = "installer"` stays** in the installer module: it
+  is what makes `nixos-anywhere` skip flaky Pi 5 kexec. Root SSH with keys goes
+  with it, because `nixos-anywhere` connects to installer targets as root. That
+  pairing is also why the flake exports no installer image: a real one needs
+  real keys.
+- **The SD `preCreateHook` stays.** It refuses a partition table or `mkfs`
+  unless the card is already the expected two-partition MBR layout with the
+  `FIRMWARE`/`NIXOS_BOOT` labels, so a damaged card is reflashed instead of
+  silently repartitioned.
+- **The root-wipe service keeps** `RemainAfterExit`, `subvol=/`, a fail-closed
+  `RequiredBy=sysroot.mount`, fixed-point nested-subvolume deletion, POSIX shell
+  only (no awk, arrays, or process substitution), and no `neededForBoot` on
+  `/boot` or `/boot/firmware`. Each of those was found empirically; see README
   "Root-wipe mechanics".
-- **Rename `NVME_BOOT` back to `NIXOS_BOOT`.** `NIXOS_BOOT` is the installer SD
-  card's ext4 partition. Sharing the label makes `by-label` lookups ambiguous
-  when the installer SD is inserted during recovery.
+- **`NVME_BOOT` is the NVMe `/boot` label; `NIXOS_BOOT` is the installer SD's
+  ext4 partition.** Sharing the label makes `by-label` lookups ambiguous with
+  the installer SD inserted during recovery.
 
 ## Keep in sync
 
 - `eeprom/boot.conf` and `eeprom/README.md` (`BOOT_ORDER=0xf416`,
-  `PCIE_PROBE=1`) with the NVMe-only section of the README and the CLI's
-  `--eeprom-config` examples. The EEPROM is not declarative.
+  `PCIE_PROBE=1`) with the README's NVMe-only section. The EEPROM is not
+  declarative.
 - README "Hard-won details", the layouts, and the option tables with module
   changes.
 
@@ -68,11 +70,10 @@ nix flake check
 `nix flake check` covers evaluation of an installer configuration and the two
 stack configurations, the negative assertion cases (including "no boot medium"
 and "both boot media"), formatting, shellcheck (including
-`modules/root-wipe.sh`), and building the `pi5-image` wrapper. It does **not**
-build the aarch64-linux SD image or the NVMe-only system; use an aarch64-linux
-builder:
+`modules/root-wipe.sh`). It does not build the aarch64-linux SD image or the
+NVMe-only system; use an aarch64-linux builder:
 
 ```bash
 nix build .#images.<name>                     # in the consuming flake
-nix build .#checks.aarch64-linux.uboot-nvme   # patched U-Boot: NVMe preboot present, boot_targets= absent
+nix build .#checks.aarch64-linux.uboot-nvme   # NVMe preboot present, boot_targets= absent
 ```
