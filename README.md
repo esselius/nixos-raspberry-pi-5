@@ -52,7 +52,6 @@ exactly one.
 | `lib.mkPi5Installer` | Builds an installer `nixosConfiguration` from a few arguments. |
 | `packages.pi5-image` / `apps.pi5-image` | Build, flash, install, provision, and apply EEPROM config. |
 | `packages.aarch64-linux.uboot-nvme` | The patched U-Boot 2026.10. |
-| `images.pi5-bootstrap` | The demo installer image built from this repository. |
 
 The module wrappers close over this flake's `nixos-hardware`, `disko`, and
 `impermanence` inputs, so consumers do not pass `inputs` through `specialArgs`
@@ -62,9 +61,9 @@ pinned `nixpkgs-uboot` input, because the main nixpkgs pin ships U-Boot
 a newer U-Boot: newer `nixos-unstable` removed `boot.initrd.systemd.enable`,
 which `pi5.impermanence` still uses.
 
-The demo installer uses a test-only public key whose private half was discarded,
-so it is intentionally unreachable. Real installer configs must set
-`sshAuthorizedKeys`.
+This flake exports no host or installer configurations: they live in the
+consuming flake, where the SSH keys are real. Build an installer with
+`lib.mkPi5Installer` and point `images.<name>` at its `sdImage`.
 
 ## Architecture
 
@@ -696,13 +695,14 @@ nix build .#pi5-image
 nix run .#pi5-image -- --help
 ```
 
-`nix flake check` evaluates the demo installer, the two stack configurations the
-`checks` build for assertion testing, and the negative assertion cases, but does
-not build the aarch64-linux system or image. Build those with an aarch64-linux
-builder:
+`nix flake check` evaluates an installer configuration, the two stack
+configurations the `checks` build for assertion testing, and the negative
+assertion cases, but does not build the aarch64-linux system or image. Build
+those with an aarch64-linux builder:
 
 ```bash
-nix build .#images.pi5-bootstrap
+# from the consuming flake, which owns the real installer image:
+nix build .#images.<name>
 nix build .#checks.aarch64-linux.uboot-nvme
 ```
 
@@ -720,8 +720,8 @@ strings result/u-boot.bin | grep -E '^boot_targets=|preboot=|U-Boot 2026'
   shellcheck, the `pi5-image` wrapper build, and the assertion cases). The same
   checks evaluate for `aarch64-linux`; `checks.aarch64-linux.uboot-nvme` builds
   and passes there.
-- `nix build .#images.pi5-bootstrap` completed through an aarch64-linux builder:
-  a 4.26 GiB raw image, 1.41 GiB compressed. The FAT partition contains the Pi 5
+- The bootstrap image built from these modules completed through an
+aarch64-linux builder: a 4.26 GiB raw image, 1.41 GiB compressed. The FAT partition contains the Pi 5
   DTBs, `u-boot.bin`, and a `config.txt` with `kernel=u-boot.bin` and
   `arm_64bit=1`; the ext4 partition contains `extlinux.conf` pointing at the
   vendor `linux-rpi` kernel and initrd (6.18.50 at extraction time).

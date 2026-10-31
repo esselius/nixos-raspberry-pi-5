@@ -33,11 +33,10 @@ the things that break the repo if you change them.
   empirically.
 - **Switch the kernel to mainline** without testing RP1 (USB + Ethernet) on
   hardware. The vendor kernel is the supported pairing for the firmware DTBs.
-- **Replace the demo key** in `flake.nix` with a real long-lived key. Its private
-  half was discarded on purpose.
 - **Drop `system.nixos.variant_id = "installer"`** from the installer module: it
   skips flaky Pi 5 kexec. Root SSH with keys is required by `nixos-anywhere`
-  (it hardcodes root for installer targets), so the two go together.
+  (it hardcodes root for installer targets), so the two go together. This is why
+  the flake exports no installer image: a real one needs real keys.
 - **Let the SD card be repartitioned.** The SD description is guarded, not merely
   `destroy = false`: its `preCreateHook` refuses to create a partition table or
   `mkfs` on anything that is not the expected two-partition MBR layout with the
@@ -66,13 +65,14 @@ nix fmt
 nix flake check
 ```
 
-`nix flake check` covers evaluation of the demo installer and the two stack
-configurations, the negative assertion cases (including "no boot medium" and
-"both boot media"), formatting, shellcheck (including `modules/root-wipe.sh`),
-and building the `pi5-image` wrapper. It does **not** build the aarch64-linux SD
-image or the NVMe-only system; use an aarch64-linux builder:
+`nix flake check` covers evaluation of an installer configuration and the two
+stack configurations, the negative assertion cases (including "no boot medium"
+and "both boot media"), formatting, shellcheck (including
+`modules/root-wipe.sh`), and building the `pi5-image` wrapper. It does **not**
+build the aarch64-linux SD image or the NVMe-only system; use an aarch64-linux
+builder:
 
 ```bash
-nix build .#images.pi5-bootstrap
+nix build .#images.<name>                     # in the consuming flake
 nix build .#checks.aarch64-linux.uboot-nvme   # patched U-Boot: NVMe preboot present, boot_targets= absent
 ```

@@ -45,19 +45,10 @@
 
       perSystem = f: nixpkgs.lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
 
-      # Public key used only by the demo installer output. The private half was
-      # discarded; nobody can log in with this image. Real installer configs
-      # should pass their own sshAuthorizedKeys (or import an SSH module).
-      demoTestSshKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPVIgmsKXn3UwSmCQ7r0GnIKQ9rxh14VzYm4gtUHhaWi pi5-demo-test-only-no-private-key-retained";
-
       # U-Boot 2026.10 with Torsten Duwe's NVMe series and the boot_targets
       # removal follow-up. The patches and their provenance are documented in
       # pkgs/uboot-nvme/README.md.
       ubootNvme = nixpkgs-uboot.legacyPackages.aarch64-linux.callPackage ./pkgs/uboot-nvme { };
-
-      bootstrap = self.lib.mkPi5Installer {
-        sshAuthorizedKeys = [ demoTestSshKey ];
-      };
     in
     {
       # Modules are grouped by concern, but the flake wrappers close over the
@@ -186,12 +177,9 @@
           ++ extraModules;
         };
 
-      # A throwaway installer image. It is a normal nixosConfiguration so the
-      # CLI can address it as `.#pi5-bootstrap`. There are deliberately no host
-      # configurations here: hosts belong in the consuming flake.
-      nixosConfigurations.pi5-bootstrap = bootstrap;
-
-      images.pi5-bootstrap = bootstrap.config.system.build.sdImage;
+      # There are deliberately no host or installer configurations here: they
+      # belong in the consuming flake, where the SSH keys are real. Build one
+      # with `lib.mkPi5Installer` and point `images.<name>` at its `sdImage`.
 
       packages = nixpkgs.lib.genAttrs systems (
         system:
@@ -282,6 +270,14 @@
 
           goodSd = mkStackConfig [ self.nixosModules.sd-boot ] { };
           goodNvme = mkStackConfig [ self.nixosModules.nvme-boot ] { };
+
+          # The installer image is evaluated here rather than exported as a
+          # flake output, because a real image needs real SSH keys. The key
+          # below is deliberately not a usable one; the installer only asserts
+          # that the root key list is non-empty.
+          installerConfig = self.lib.mkPi5Installer {
+            sshAuthorizedKeys = [ "check-only-not-a-key" ];
+          };
 
           # Failed assertion messages, or null if evaluation itself threw (an
           # unknown option, a type error). Matching messages is what makes these
@@ -412,8 +408,8 @@
           # Force the full closures, not just the assertions. The stacks above
           # cover the eval that the old example hosts used to cover.
           drvs = [
-            bootstrap.config.system.build.toplevel
-            bootstrap.config.system.build.sdImage
+            installerConfig.config.system.build.toplevel
+            installerConfig.config.system.build.sdImage
             goodSd.config.system.build.toplevel
             goodNvme.config.system.build.toplevel
           ];
