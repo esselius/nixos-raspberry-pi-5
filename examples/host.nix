@@ -1,5 +1,6 @@
-# Example host for the full stack. Replace the hostname, SSH key, and any
-# service-specific settings with your own.
+# Example SD-boot host for the full stack. Replace the hostname, SSH key, and
+# any service-specific settings with your own. See examples/nvme-boot/host.nix
+# for the NVMe-only variant.
 {
   networking.hostName = "pi5-example";
   system.stateVersion = "26.05";

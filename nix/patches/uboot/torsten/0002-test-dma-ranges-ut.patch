@@ -1,0 +1,85 @@
+diff --git a/arch/sandbox/dts/test.dts b/arch/sandbox/dts/test.dts
+index d24feec5422..3ce52927fc5 100644
+--- a/arch/sandbox/dts/test.dts
++++ b/arch/sandbox/dts/test.dts
+@@ -656,6 +656,15 @@
+ 		subnode@0 {
+ 			compatible = "denx,u-boot-fdt-test";
+ 		};
++		bus@7 {
++			#address-cells = <1>;
++			#size-cells = <1>;
++			compatible = "denx,u-boot-test-bus";
++
++			subnode@8 {
++				  compatible = "denx,u-boot-fdt-test";
++			};
++		};
+ 	};
+ 
+ 	mmio-bus@1 {
+diff --git a/test/dm/ofnode.c b/test/dm/ofnode.c
+index 0f60c2a6281..d7bad2fa621 100644
+--- a/test/dm/ofnode.c
++++ b/test/dm/ofnode.c
+@@ -193,7 +193,7 @@ static int check_prop_values(struct unit_test_state *uts, ofnode start,
+ static int dm_test_ofnode_by_prop_value(struct unit_test_state *uts)
+ {
+ 	ut_assertok(check_prop_values(uts, ofnode_null(), "compatible",
+-				      "denx,u-boot-fdt-test", 11));
++				      "denx,u-boot-fdt-test", 12));
+ 
+ 	return 0;
+ }
+@@ -1263,7 +1263,7 @@ static int dm_test_ofnode_by_compatible(struct unit_test_state *uts)
+ 	for (node = ofnode_null();
+ 	     node = ofnode_by_compatible(node, compat), ofnode_valid(node);)
+ 		count++;
+-	ut_asserteq(11, count);
++	ut_asserteq(12, count);
+ 
+ 	return 0;
+ }
+diff --git a/test/dm/phys2bus.c b/test/dm/phys2bus.c
+index 67f33904943..3744a2eb928 100644
+--- a/test/dm/phys2bus.c
++++ b/test/dm/phys2bus.c
+@@ -31,6 +31,38 @@ static int dm_test_phys_to_bus(struct unit_test_state *uts)
+ 	ut_asserteq_addr((void*)0x1003ffffULL, (void*)dev_phys_to_bus(dev, 0x3ffff));
+ 	ut_asserteq_addr((void*)0x3ffffULL, (void*)(ulong)dev_bus_to_phys(dev, 0x1003ffff));
+ 
++#if CONFIG_IS_ENABLED(OF_REAL)
++	if (uts->of_live) {
++		/* DMA-ranges are to be found on the grandparent bus node,
++		 * DT nodes neither here nor at parent.
++		 */
++		struct udevice *pdev;
++		ofnode psave, nsave;
++
++		node = ofnode_path("/mmio-bus@0/bus@7");
++		ut_assert(ofnode_valid(node));
++		ut_assertok(uclass_get_device_by_ofnode(UCLASS_TEST_BUS, node, &pdev));
++
++		/* pretend the devices were discovered dynamically and have no DT node */
++		psave = pdev->node_;
++		pdev->node_.np = NULL;
++
++		node = ofnode_path("/mmio-bus@0/bus@7/subnode@8");
++		ut_assert(ofnode_valid(node));
++		ut_assertok(uclass_get_device_by_ofnode(UCLASS_TEST_FDT, node, &dev));
++
++		nsave = dev->node_;
++		dev->node_.np = NULL;
++
++		ut_asserteq_ptr((void *)0x1003ffffULL,
++				(void *)dev_phys_to_bus(dev, 0x3ffffULL));
++		ut_asserteq_ptr((void *)0x3ffffULL,
++				(void *)(ulong)dev_bus_to_phys(dev, 0x1003ffff));
++
++		pdev->node_ = psave;
++		dev->node_ = nsave;
++	}
++#endif
+ 	return 0;
+ }
+ DM_TEST(dm_test_phys_to_bus, UTF_SCAN_PDATA | UTF_SCAN_FDT);

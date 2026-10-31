@@ -17,6 +17,10 @@ writeShellApplication {
     nixos-anywhere
     zstd
     openssh
+    coreutils
+    gawk
+    gnused
+    gnugrep
   ]
   ++ lib.optional stdenv.hostPlatform.isLinux util-linux;
   text = builtins.readFile ../scripts/pi5-image.sh;

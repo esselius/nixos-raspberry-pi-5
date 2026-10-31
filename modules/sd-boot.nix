@@ -38,7 +38,7 @@ in
   };
 
   config = lib.mkMerge [
-    {
+    (lib.mkIf (!(options.pi5 ? nvmeBoot)) {
       disko.devices.disk.pi5-sd = {
         type = "disk";
         device = cfg.device;
@@ -144,28 +144,37 @@ in
           ];
         };
       };
-    }
+    })
 
     {
-      assertions =
-        lib.optionals (options.pi5 ? nvme) [
-          {
-            assertion = cfg.device != config.pi5.nvme.device;
-            message = ''
-              pi5.sdBoot.device and pi5.nvme.device must be different disks;
-              disko otherwise has two definitions for the same device.
-            '';
-          }
-        ]
-        ++ lib.optionals (lib.hasAttrByPath [ "hardware" "raspberry-pi" "firmware" "path" ] options) [
-          {
-            assertion = config.hardware.raspberry-pi.firmware.path == "/boot/firmware";
-            message = ''
-              pi5.sdBoot expects the firmware at /boot/firmware (the stock
-              sd-image layout). The firmware activation path must match.
-            '';
-          }
-        ];
+      assertions = [
+        {
+          assertion = !(options.pi5 ? nvmeBoot);
+          message = ''
+            pi5.sdBoot and pi5.nvmeBoot describe different /boot media and
+            both claim /boot and /boot/firmware. Choose exactly one boot
+            module: nixosModules.sd-boot or nixosModules.nvme-boot.
+          '';
+        }
+      ]
+      ++ lib.optionals (options.pi5 ? nvme) [
+        {
+          assertion = cfg.device != config.pi5.nvme.device;
+          message = ''
+            pi5.sdBoot.device and pi5.nvme.device must be different disks;
+            disko otherwise has two definitions for the same device.
+          '';
+        }
+      ]
+      ++ lib.optionals (lib.hasAttrByPath [ "hardware" "raspberry-pi" "firmware" "path" ] options) [
+        {
+          assertion = config.hardware.raspberry-pi.firmware.path == "/boot/firmware";
+          message = ''
+            pi5.sdBoot expects the firmware at /boot/firmware (the stock
+            sd-image layout). The firmware activation path must match.
+          '';
+        }
+      ];
     }
   ];
 }

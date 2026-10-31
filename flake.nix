@@ -18,6 +18,13 @@
       url = "github:nix-community/impermanence";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    # U-Boot 2026.10 lives here. The main nixpkgs pin still ships U-Boot
+    # 2026.07, which lacks the NVMe inbound address-translation fix, and it must
+    # not float: newer nixos-unstable removed boot.initrd.systemd.enable, which
+    # pi5.impermanence still uses. This input is only used for the Raspberry Pi
+    # 5 U-Boot package.
+    nixpkgs-uboot.url = "github:NixOS/nixpkgs/31ecbaca1bdefa45dffc409f0250bd8039ea0010";
   };
 
   outputs =
@@ -27,6 +34,7 @@
       nixos-hardware,
       disko,
       impermanence,
+      nixpkgs-uboot,
     }:
     let
       systems = [
@@ -44,15 +52,28 @@
       # their own sshAuthorizedKeys (or import an SSH module).
       exampleSshKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPVIgmsKXn3UwSmCQ7r0GnIKQ9rxh14VzYm4gtUHhaWi pi5-demo-test-only-no-private-key-retained";
 
+      # U-Boot 2026.10 with Torsten Duwe's NVMe series and the boot_targets
+      # removal follow-up. The patches and their provenance are documented in
+      # nix/patches/uboot/README.md.
+      ubootNvme = nixpkgs-uboot.legacyPackages.aarch64-linux.callPackage ./nix/uboot-nvme.nix { };
+
       bootstrap = self.lib.mkPi5Installer {
         sshAuthorizedKeys = [ exampleSshKey ];
       };
 
-      exampleHost = nixpkgs.lib.nixosSystem {
+      exampleSdHost = nixpkgs.lib.nixosSystem {
         system = "aarch64-linux";
         modules = [
-          self.nixosModules.default
+          self.nixosModules.default-sd-boot
           ./examples/host.nix
+        ];
+      };
+
+      exampleNvmeHost = nixpkgs.lib.nixosSystem {
+        system = "aarch64-linux";
+        modules = [
+          self.nixosModules.default-nvme-boot
+          ./examples/nvme-boot/host.nix
         ];
       };
     in
@@ -61,6 +82,8 @@
       # flake inputs. Consumers therefore never have to pass `inputs` through
       # `specialArgs` or import disko/impermanence/nixos-hardware themselves.
       nixosModules = {
+        # The stack without a boot medium. Choose one explicitly with
+        # `sd-boot` or `nvme-boot`, or use one of the full-stack wrappers below.
         default =
           { ... }:
           {
@@ -69,6 +92,26 @@
               disko.nixosModules.disko
               impermanence.nixosModules.impermanence
               ./modules/default.nix
+            ];
+          };
+
+        # Full stacks for the two supported boot media. Both are explicit
+        # opt-ins; `default` alone is not bootable.
+        default-sd-boot =
+          { ... }:
+          {
+            imports = [
+              self.nixosModules.default
+              self.nixosModules.sd-boot
+            ];
+          };
+
+        default-nvme-boot =
+          { ... }:
+          {
+            imports = [
+              self.nixosModules.default
+              self.nixosModules.nvme-boot
             ];
           };
 
@@ -97,6 +140,19 @@
               disko.nixosModules.disko
               ./modules/sd-boot.nix
             ];
+          };
+
+        # NVMe-only boot: firmware + U-Boot + /boot live on the NVMe, so the SD
+        # card is only the installer medium. This module needs the hardware and
+        # nvme-root modules; `default-nvme-boot` wires all three together.
+        nvme-boot =
+          { ... }:
+          {
+            imports = [
+              disko.nixosModules.disko
+              ./modules/nvme-boot.nix
+            ];
+            pi5.nvmeBoot.ubootPackage = nixpkgs.lib.mkDefault ubootNvme;
           };
 
         impermanence =
@@ -148,16 +204,18 @@
         # CLI can address it as `.#pi5-bootstrap`.
         pi5-bootstrap = bootstrap;
 
-        # Evaluation example for the full host stack. It is not meant to be a
-        # real machine; see examples/host.nix.
-        pi5-example = exampleHost;
+        # Evaluation examples for the full host stacks. They are not meant to
+        # be real machines; see examples/.
+        pi5-example = exampleSdHost;
+        pi5-nvme-example = exampleNvmeHost;
       };
 
       images.pi5-bootstrap = bootstrap.config.system.build.sdImage;
 
-      packages = perSystem (
-        system: pkgs:
+      packages = nixpkgs.lib.genAttrs systems (
+        system:
         let
+          pkgs = nixpkgs.legacyPackages.${system};
           pi5-image = pkgs.callPackage ./nix/pi5-image.nix { };
         in
         {
@@ -166,6 +224,11 @@
           # their only source of nixos-anywhere.
           nixos-anywhere = pkgs.nixos-anywhere;
           default = pi5-image;
+        }
+        // nixpkgs.lib.optionalAttrs (system == "aarch64-linux") {
+          # The patched U-Boot used by nixosModules.nvme-boot. Exposed for
+          # inspection (`strings .../u-boot.bin`) and manual testing.
+          uboot-nvme = ubootNvme;
         }
       );
 
@@ -228,7 +291,7 @@
             nixpkgs.lib.nixosSystem {
               system = "aarch64-linux";
               modules = [
-                self.nixosModules.default
+                self.nixosModules.default-sd-boot
                 {
                   networking.hostName = "assertion-test";
                   system.stateVersion = "26.05";
@@ -236,6 +299,47 @@
                 extra
               ];
             };
+
+          mkNvmeConfig =
+            extra:
+            nixpkgs.lib.nixosSystem {
+              system = "aarch64-linux";
+              modules = [
+                self.nixosModules.default-nvme-boot
+                {
+                  networking.hostName = "nvme-assertion-test";
+                  system.stateVersion = "26.05";
+                }
+                extra
+              ];
+            };
+
+          # `default` deliberately has no boot medium; importing it alone must
+          # fail with the "choose sd-boot or nvme-boot" assertion.
+          bareConfig = nixpkgs.lib.nixosSystem {
+            system = "aarch64-linux";
+            modules = [
+              self.nixosModules.default
+              {
+                networking.hostName = "bare-assertion-test";
+                system.stateVersion = "26.05";
+              }
+            ];
+          };
+
+          # Both boot media claim /boot; they must not be combined.
+          bothBootConfig = nixpkgs.lib.nixosSystem {
+            system = "aarch64-linux";
+            modules = [
+              self.nixosModules.default-sd-boot
+              self.nixosModules.nvme-boot
+              {
+                networking.hostName = "both-boot-assertion-test";
+                system.stateVersion = "26.05";
+              }
+            ];
+          };
+
           fails = config: !(builtins.tryEval config.config.system.build.toplevel.drvPath).success;
           assertionsOk =
             fails (mkAssertionConfig {
@@ -251,7 +355,16 @@
             && fails (mkAssertionConfig {
               pi5.impermanence.persistPath = "/not-a-fs";
             })
-            && !(fails (mkAssertionConfig { }));
+            && fails bareConfig
+            && fails bothBootConfig
+            && fails (mkNvmeConfig {
+              pi5.nvmeBoot.firmwareLabel = "NIXOS_BOOT";
+            })
+            && fails (mkNvmeConfig {
+              pi5.nvmeBoot.ubootPackage = nixpkgs.legacyPackages.aarch64-linux.ubootRaspberryPiAarch64;
+            })
+            && !(fails (mkAssertionConfig { }))
+            && !(fails (mkNvmeConfig { }));
         in
         {
           # Cross-system check that the CLI wrapper still builds (and passes
@@ -299,6 +412,24 @@
               ''
                 cd "$src"
                 shellcheck modules/scripts/*.sh scripts/*.sh
+                touch $out
+              '';
+        }
+        // nixpkgs.lib.optionalAttrs (system == "aarch64-linux") {
+          # U-Boot is an aarch64-linux derivation; run the binary check only
+          # where it can build natively (the CI arm64 Linux runner).
+          uboot-nvme =
+            pkgs.runCommand "uboot-nvme-check"
+              {
+                nativeBuildInputs = [ pkgs.gnugrep ];
+              }
+              ''
+                grep -aq 'preboot=pci enum; usb start; nvme scan;' ${ubootNvme}/u-boot.bin
+                grep -aq 'U-Boot 2026.10' ${ubootNvme}/u-boot.bin
+                if grep -aq '^boot_targets=' ${ubootNvme}/u-boot.bin; then
+                  echo "uboot-nvme: u-boot.bin still sets boot_targets; the v2 patch did not apply" >&2
+                  exit 1
+                fi
                 touch $out
               '';
         }

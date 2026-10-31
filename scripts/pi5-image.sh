@@ -17,6 +17,7 @@ target=""
 output=""
 wait_seconds=180
 wipe_nvme=""
+eeprom_config=""
 ssh_key=""
 build_on="auto"
 assume_yes=0
@@ -52,7 +53,8 @@ Usage:
   pi5-image build     [--flake FLAKE] [--installer NAME] [--output FILE] [--force]
   pi5-image flash     IMAGE DISK [--yes] [--dry-run]
   pi5-image install   --host HOST [--flake FLAKE] [--mode mount|wipe] TARGET
-  pi5-image provision --host HOST [--flake FLAKE] DISK TARGET
+  pi5-image provision --host HOST [--flake FLAKE] [--eeprom-config FILE] DISK TARGET
+  pi5-image eeprom    --eeprom-config FILE [--yes] TARGET
 
 Commands:
   build      Build the installer's system.build.sdImage and write a decompressed .img.
@@ -61,6 +63,8 @@ Commands:
              Default mode is mount: keep the existing NVMe content.
   provision  Build the installer, flash it, wait for SSH, then install.
              Default mode is wipe: destroy and recreate the NVMe.
+  eeprom     Apply a Raspberry Pi EEPROM config (for example the NVMe-first
+             BOOT_ORDER) to a reachable target, then remind you to power-cycle.
 
 Options:
   --flake FLAKE       Flake to evaluate (default: .)
@@ -68,6 +72,8 @@ Options:
   --host NAME         nixosConfiguration to install
   --mode MODE         mount (preserve NVMe and SD) or wipe (destroy/recreate NVMe; SD is disposable)
   --output FILE       build: decompressed image path (default: <installer>.img)
+  --eeprom-config FILE  install/provision/eeprom: EEPROM config to apply with
+                      rpi-eeprom-config before installing. Required for eeprom.
   --ssh-key FILE      SSH identity used by nixos-anywhere and the wait loop
   --ssh-port PORT     SSH port for the target (default: nixos-anywhere's 22)
   --ssh-option OPT    extra ssh -o option (repeatable)
@@ -89,6 +95,9 @@ Examples:
   pi5-image flash pi5-bootstrap.img /dev/rdisk4
   pi5-image install --flake . --host rpi5-8gb root@192.168.50.80
   pi5-image provision --flake . --host rpi5-8gb /dev/rdisk4 root@192.168.50.80
+  pi5-image eeprom --eeprom-config examples/nvme-boot/boot.conf root@192.168.50.80
+  pi5-image provision --flake . --host rpi5-8gb --eeprom-config boot.conf \
+    /dev/rdisk4 root@192.168.50.80
 
 Set NIXOS_ANYWHERE=/path/to/nixos-anywhere to override the pinned tool.
 EOF
@@ -467,9 +476,47 @@ check_installer_target() {
   fi
 }
 
+apply_eeprom() {
+  local file=$1 remote=$2 encoded script
+  [ -f "$file" ] || die "EEPROM config not found: $file"
+  grep -q '^BOOT_ORDER=' "$file" || die "EEPROM config $file does not set BOOT_ORDER="
+
+  # Pass the config as base64 so it survives ssh and quoting unchanged. The
+  # target is Linux, so GNU base64 -d is available.
+  encoded=$(base64 <"$file" | tr -d '\n')
+  script=$(
+    cat <<EOF
+tmp=\$(mktemp /tmp/pi5-eeprom.XXXXXX)
+echo '$encoded' | base64 -d >"\$tmp"
+if command -v rpi-eeprom-config >/dev/null 2>&1; then
+  sudo rpi-eeprom-config --apply "\$tmp"
+elif command -v nix >/dev/null 2>&1; then
+  sudo nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#raspberrypi-eeprom -c rpi-eeprom-config --apply "\$tmp"
+else
+  echo "pi5-image: rpi-eeprom-config not found and nix is unavailable on $remote" >&2
+  rm -f "\$tmp"
+  exit 1
+fi
+rm -f "\$tmp"
+echo "pi5-image: EEPROM config applied; power-cycle the board for BOOT_ORDER to take effect."
+EOF
+  )
+
+  if [ "$dry_run" -eq 1 ]; then
+    log "would apply EEPROM config $file to $remote with rpi-eeprom-config --apply"
+    return 0
+  fi
+  log "applying EEPROM config $file to $remote"
+  do_ssh "$remote" "$script"
+}
+
 do_install() {
   local na=${NIXOS_ANYWHERE:-nixos-anywhere}
   local -a args=(--flake "${flake}#${host}" --build-on "$build_on")
+
+  if [ -n "$eeprom_config" ]; then
+    apply_eeprom "$eeprom_config" "$target"
+  fi
 
   if [ "$mode" = "mount" ]; then
     args+=(--disko-mode mount)
@@ -619,9 +666,24 @@ cmd_provision() {
   do_install
 }
 
+cmd_eeprom() {
+  if [ "${#positional[@]}" -ne 1 ]; then
+    die "usage: pi5-image eeprom --eeprom-config FILE TARGET"
+  fi
+  if [ -z "$eeprom_config" ]; then
+    die "--eeprom-config is required for the eeprom command"
+  fi
+
+  target=${positional[0]}
+  if [ "$dry_run" -eq 0 ]; then
+    confirm "Apply EEPROM config '$eeprom_config' to $target."
+  fi
+  apply_eeprom "$eeprom_config" "$target"
+}
+
 command=${1:-}
 case "$command" in
-  build | flash | install | provision) shift ;;
+  build | flash | install | provision | eeprom) shift ;;
   help | -h | --help | "")
     usage
     exit 0
@@ -701,6 +763,11 @@ while [ "$#" -gt 0 ]; do
       wipe_nvme=$2
       shift 2
       ;;
+    --eeprom-config)
+      [ "$#" -ge 2 ] || die "--eeprom-config requires a value"
+      eeprom_config=$2
+      shift 2
+      ;;
     --no-wait)
       no_wait=1
       shift
@@ -769,6 +836,10 @@ if [ "$command" != "build" ] && [ -n "$output" ]; then
   die "--output is only supported by build"
 fi
 
+if [ -n "$eeprom_config" ] && [ "$command" != "install" ] && [ "$command" != "provision" ] && [ "$command" != "eeprom" ]; then
+  die "--eeprom-config is only supported by install, provision, and eeprom"
+fi
+
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/pi5-image.XXXXXX") \
   || die "cannot create a temporary directory"
 
@@ -777,4 +848,5 @@ case "$command" in
   flash) cmd_flash ;;
   install) cmd_install ;;
   provision) cmd_provision ;;
+  eeprom) cmd_eeprom ;;
 esac

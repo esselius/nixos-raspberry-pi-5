@@ -1,0 +1,10 @@
+diff --git a/board/raspberrypi/rpi/rpi.env b/board/raspberrypi/rpi/rpi.env
+index 9ac9d67..acf4824 100644
+--- a/board/raspberrypi/rpi/rpi.env
++++ b/board/raspberrypi/rpi/rpi.env
+@@ -76,5 +76,3 @@ scriptaddr=0x05400000
+ pxefile_addr_r=0x05500000
+ fdt_addr_r=0x05600000
+ ramdisk_addr_r=0x05700000
+-
+-boot_targets=mmc usb pxe dhcp

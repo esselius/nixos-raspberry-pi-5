@@ -66,9 +66,10 @@ in
       type = lib.types.str;
       default = "NIXOS_BOOT";
       description = ''
-        Filesystem label of the ext4 boot/root partition on the SD card. Must
-        match {option}`pi5.sdBoot.rootLabel` if the target host uses the sd-boot
-        module.
+        Filesystem label of the ext4 boot/root partition on the installer SD
+        card. Must match {option}`pi5.sdBoot.rootLabel` for SD-boot targets. It
+        is not the target NVMe's `/boot` label; see
+        {option}`pi5.nvmeBoot.bootLabel` for the NVMe-only path.
       '';
     };
 
