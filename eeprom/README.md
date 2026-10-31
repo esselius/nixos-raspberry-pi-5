@@ -7,9 +7,12 @@ The Pi 5 bootloader is not declarative: there is no NixOS option for it, and
 sudo rpi-eeprom-config --apply boot.conf
 ```
 
-`pi5-image eeprom --eeprom-config eeprom/boot.conf <target>` does the same
-remotely, and `install`/`provision` accept `--eeprom-config` to apply it before
-`nixos-anywhere` runs.
+Remotely, from the workstation that can reach the installer:
+
+```bash
+scp eeprom/boot.conf root@<installer-ip>:/tmp/boot.conf
+ssh root@<installer-ip> 'sudo rpi-eeprom-config --apply /tmp/boot.conf'
+```
 
 ```ini
 [all]
