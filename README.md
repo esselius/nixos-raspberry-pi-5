@@ -354,6 +354,10 @@ the reflashed installer; with the SD inserted, U-Boot's standard boot order
 still scans MMC before NVMe, so the installer boots for recovery. See
 `eeprom/README.md` for the bootloader details and the HAT+ caveat.
 
+Because the NVMe-only stack declares only the NVMe's three partitions, disko and
+`nixos-anywhere` put firmware, U-Boot, extlinux, the kernel, and the btrfs root
+all on the NVMe; the installer SD is not part of the mount set.
+
 ## Module reference
 
 `base` is `hardware` + `storage` + `impermanence`, and deliberately has no boot
@@ -538,66 +542,21 @@ aarch64-linux builder (or a Linux host); the CLI does not hide that. The Nix
 build output is rooted with an out-link until the command exits, so a concurrent
 GC cannot remove it mid-flash.
 
-## Install playbooks
-
-### Hard reset (wipes NVMe)
-
-```bash
-nix run .#pi5-image -- build --flake . --installer rpi5-bootstrap --output pi5-bootstrap.img
-nix run .#pi5-image -- flash pi5-bootstrap.img /dev/rdisk4
-# boot the Pi with the NVMe attached
-nix run .#pi5-image -- install --flake . --host rpi5-8gb --mode wipe root@<ip>
-```
-
-No manual chroot or `switch-to-configuration boot` dance is needed. The SD
-card's partitions are declared in disko, so the bootloader install step writes
-into the SD card in the same run. With `--mode wipe`, nixos-anywhere uses disko's
-default destroy/create path: the NVMe is recreated and the SD is mounted for the
-bootloader install. The SD is disposable; reflash it if the install is
-interrupted. A soft reset uses `--mode mount` and only mounts both disks.
-
-### NVMe-only install (SD only as installer)
-
-```bash
-# One-time EEPROM change: NVMe first, SD fallback.
-nix run .#pi5-image -- eeprom \
-  --eeprom-config eeprom/boot.conf root@<ip>
-
-# Install the host that uses nixosModules.nvme-boot.
-nix run .#pi5-image -- install --flake . --host rpi5-8gb-nvme --mode wipe root@<ip>
-```
-
-The target host must use `nixosModules.nvme-boot`. Disko then only declares the
-NVMe's three partitions, so `nixos-anywhere` installs firmware, U-Boot, extlinux,
-the kernel, and the btrfs root all on the NVMe. There is no `boot-sd` module and
-the installer SD is not part of the mount set. The EEPROM change is separate
-because NixOS has no declarative EEPROM option; `provision ... --eeprom-config
-FILE` does it in one run.
-
-After the install, power off and remove the SD card. The EEPROM order (`0xf416`)
-keeps SD as the fallback, and U-Boot's standard boot order scans MMC before NVMe,
-so an inserted installer SD still boots for recovery.
-
-### Soft reset (SD reflash, NVMe preserved)
-
-```bash
-# reflash the installer, boot it, then:
-nix run .#pi5-image -- install --flake . --host rpi5-8gb --mode mount root@<ip>
-```
-
-For an NVMe-only host, `--mode mount` preserves the NVMe content, but the
-installer SD must still be bootable; the EEPROM fallback or an inserted SD is
-what gets you back into the installer.
-
-### Recovery
+## Recovery
 
 | Symptom | Fix | NVMe impact |
 |---------|-----|-------------|
-| SD card or bootloader broken, NVMe fine | reflash the installer, then soft reset | none |
-| Want a genuinely clean slate | reflash the installer, then hard reset | destroyed |
+| SD card or bootloader broken, NVMe fine | reflash the installer, then soft reset (`--mode mount`) | none |
+| Want a genuinely clean slate | reflash the installer, then hard reset (`--mode wipe`) | destroyed |
 | Host does not boot after a bad activation | select the previous generation at the U-Boot/extlinux prompt on SD p2 or NVMe p2 | none |
 | NVMe-only host needs the installer | insert the reflashed SD; U-Boot scans MMC before NVMe | none |
 | NVMe-only host, installer SD lost | reflash a fresh installer SD and boot it | none |
+
+No manual chroot or `switch-to-configuration boot` dance is needed on any of
+these: the boot medium's partitions are declared in disko, so the bootloader
+install step writes into them in the same `nixos-anywhere` run. With `--mode
+wipe` the NVMe is recreated and the SD is mounted for the bootloader install;
+with `--mode mount` both disks are only mounted.
 
 ## Hard-won details
 
