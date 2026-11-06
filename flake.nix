@@ -49,6 +49,21 @@
       # removal follow-up. The patches and their provenance are documented in
       # pkgs/uboot-nvme/README.md.
       ubootNvme = nixpkgs-uboot.legacyPackages.aarch64-linux.callPackage ./pkgs/uboot-nvme { };
+
+      # The main nixpkgs pin ships the -2711 EEPROM release, which has no Pi 5
+      # (BCM2712) bootloader images. Rebuild the -2712 release with the local
+      # package recipe until the pin catches up; the recipe is identical, only
+      # version and source differ. Drop the override and the `package` default
+      # when the main pin ships the -2712 release.
+      eepromPackage = nixpkgs.legacyPackages.aarch64-linux.raspberrypi-eeprom.overrideAttrs (_old: rec {
+        version = "2026.09.25-2712";
+        src = nixpkgs.legacyPackages.aarch64-linux.fetchFromGitHub {
+          owner = "raspberrypi";
+          repo = "rpi-eeprom";
+          tag = "v${version}";
+          hash = "sha256-OBl122T7wcKLFoMqxF31vee3Y8oiapTIBYI42OBVQ4U=";
+        };
+      });
     in
     {
       # Modules are grouped by concern, but the flake wrappers close over the
@@ -76,6 +91,20 @@
               self.nixosModules.base
               self.nixosModules.boot-nvme
             ];
+
+            # The NVMe-first boot order is what this stack means. The settings
+            # are defaults so a host can change them (for example drop
+            # PCIE_PROBE on a HAT+ carrier). `enable` only converges an
+            # installed host: the installer image that performs the first
+            # install needs the same options (see lib.mkPi5Installer's `eeprom`
+            # argument).
+            pi5.eeprom = {
+              enable = nixpkgs.lib.mkDefault true;
+              settings = {
+                BOOT_ORDER = nixpkgs.lib.mkDefault "0xf416";
+                PCIE_PROBE = nixpkgs.lib.mkDefault 1;
+              };
+            };
           };
 
         # Everything except a boot medium. Only useful when composing yourself.
@@ -120,7 +149,12 @@
             imports = [
               nixos-hardware.nixosModules.raspberry-pi-5
               ./modules/raspberry-pi-5.nix
+              ./modules/eeprom.nix
             ];
+
+            # Always provide a package with BCM2712 bootloader images, even when
+            # the consumer's nixpkgs predates them.
+            pi5.eeprom.package = nixpkgs.lib.mkDefault eepromPackage;
           };
 
         storage =
@@ -160,6 +194,7 @@
           hostName ? "pi5-bootstrap",
           stateVersion ? "26.05",
           sshAuthorizedKeys ? [ ],
+          eeprom ? { },
           extraModules ? [ ],
           specialArgs ? { },
         }:
@@ -172,6 +207,10 @@
                 hostName = nixpkgs.lib.mkDefault hostName;
                 sshAuthorizedKeys = nixpkgs.lib.mkDefault sshAuthorizedKeys;
               };
+              # The installer runs before the target exists, so it is the only
+              # place that can set the EEPROM for the first NVMe boot. Pass the
+              # same settings the target host uses; see README "Quick start".
+              pi5.eeprom = nixpkgs.lib.mkDefault eeprom;
               system.stateVersion = nixpkgs.lib.mkDefault stateVersion;
             }
           ]
@@ -188,6 +227,11 @@
           # The patched U-Boot used by nixosModules.nvme-boot. Exposed for
           # inspection (`strings .../u-boot.bin`) and manual testing.
           uboot-nvme = ubootNvme;
+
+          # The backported -2712 bootloader tool and images used by
+          # pi5.eeprom. Exposed for the manual path: `nix build` it, then run
+          # `sudo result/bin/rpi-eeprom-config --apply ...`.
+          raspberrypi-eeprom = eepromPackage;
         }
       );
 
@@ -376,6 +420,20 @@
               expect = "requires U-Boot 2026.10";
             }
             {
+              name = "enabled EEPROM configuration needs settings";
+              config = mkStackConfig [ self.nixosModules.nvme-boot ] {
+                pi5.eeprom.settings = lib.mkForce { };
+              };
+              expect = "pi5.eeprom.settings is empty";
+            }
+            {
+              name = "EEPROM setting names are bootloader keys";
+              config = mkStackConfig [ self.nixosModules.nvme-boot ] {
+                pi5.eeprom.settings."boot_order" = "0xf416";
+              };
+              expect = "must be bootloader configuration names";
+            }
+            {
               name = "installer needs a root SSH key";
               config = self.lib.mkPi5Installer { };
               expect = "needs at least one root SSH key";
@@ -442,6 +500,23 @@
               '';
         }
         // nixpkgs.lib.optionalAttrs (system == "aarch64-linux") {
+          # The EEPROM derivation is built for aarch64-linux, so this check only
+          # runs where that is the native system (the CI arm64 Linux runner).
+          eeprom =
+            pkgs.runCommand "eeprom-check"
+              {
+                nativeBuildInputs = [
+                  pkgs.coreutils
+                  pkgs.gnugrep
+                ];
+              }
+              ''
+                grep -qxF '[all]' ${goodNvme.config.pi5.eeprom.configFile}
+                grep -qxF 'BOOT_ORDER=0xf416' ${goodNvme.config.pi5.eeprom.configFile}
+                grep -qxF 'PCIE_PROBE=1' ${goodNvme.config.pi5.eeprom.configFile}
+                touch $out
+              '';
+
           # U-Boot is an aarch64-linux derivation; run the binary check only
           # where it can build natively (the CI arm64 Linux runner).
           uboot-nvme =

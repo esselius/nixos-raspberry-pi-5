@@ -20,6 +20,9 @@ build (`nix build .#images.<name>`), flash (`zstd -dc | dd`), and install
   and `impermanence`, so consumers never pass `inputs` through `specialArgs`.
 - `modules/lib/labels.nix` is the only definition of the partition labels and SD
   geometry; every module reads it.
+- `hardware` also owns `pi5.eeprom` (`modules/eeprom.nix`). The installer imports
+  `hardware`, so the same options reach the image that runs before the NVMe can
+  boot.
 - `pkgs/uboot-nvme/` holds the U-Boot derivation, its patches, and their
   provenance in one place.
 
@@ -49,15 +52,24 @@ build (`nix build .#images.<name>`), flash (`zstd -dc | dd`), and install
   only (no awk, arrays, or process substitution), and no `neededForBoot` on
   `/boot` or `/boot/firmware`. Each of those was found empirically; see README
   "Root-wipe mechanics".
+- **The EEPROM apply stays compare-then-apply.** `modules/eeprom-apply.sh` reads
+  the running configuration and skips when every declared key already matches.
+  On BCM2712 `rpi-eeprom-config --apply` writes the SPI EEPROM immediately via
+  flashrom, so an unconditional apply would flash on every boot. Keep the
+  comparison case-insensitive and fail closed when the current config cannot be
+  read.
+- **`pi5.eeprom.package` stays on the backported `-2712` release** until the
+  pinned nixpkgs ships Pi 5 bootloader images; the main pin's
+  `raspberrypi-eeprom` is the `-2711` release and has none. The package selects
+  the bootloader version as well as the config.
 - **`NVME_BOOT` is the NVMe `/boot` label; `NIXOS_BOOT` is the installer SD's
   ext4 partition.** Sharing the label makes `by-label` lookups ambiguous with
   the installer SD inserted during recovery.
 
 ## Keep in sync
 
-- `eeprom/boot.conf` and `eeprom/README.md` (`BOOT_ORDER=0xf416`,
-  `PCIE_PROBE=1`) with the README's NVMe-only section. The EEPROM is not
-  declarative.
+- `eeprom/README.md`, the README's "`pi5.eeprom`" and "EEPROM mechanics"
+  sections, and `modules/eeprom.nix`.
 - README "Hard-won details", the layouts, and the option tables with module
   changes.
 

@@ -23,10 +23,12 @@ The build, flash, and install steps are plain `nix build`, `dd`, and
 | `modules/impermanence.nix` | What persists, the per-boot root reset, optional snapper. |
 | `modules/installer.nix` | Turns a configuration into the throwaway bootstrap SD image. |
 | `modules/raspberry-pi-5.nix` | The two fixes the `nixos-hardware` Pi 5 profile still needs. |
+| `modules/eeprom.nix` | Declarative bootloader EEPROM settings (`pi5.eeprom`) and the service that applies them. |
+| `modules/eeprom-apply.sh` | Compares the declared keys with the running EEPROM; applies only on drift. |
 | `modules/lib/labels.nix` | Partition labels and SD geometry shared by the image and the hosts. |
 | `modules/root-wipe.sh` | The initrd script that resets `@root`. |
 | `pkgs/uboot-nvme/` | Patched U-Boot 2026.10 and the provenance of every patch. |
-| `eeprom/` | The non-declarative Pi 5 bootloader configuration. |
+| `eeprom/` | EEPROM caveats and the manual escape hatch. |
 | `flake.nix` | The public surface: modules, `mkPi5Installer`, the patched U-Boot package. |
 
 ## Flake outputs
@@ -40,12 +42,13 @@ exactly one.
 | `nixosModules.nvme-boot` | Everything, with firmware + U-Boot + `/boot` on the NVMe. No SD card at runtime. |
 | `nixosModules.base` | Everything except a boot medium. Only for composing yourself. |
 | `nixosModules.boot-sd` / `boot-nvme` | The granular boot modules. `boot-nvme` needs `hardware` and `storage`. |
-| `nixosModules.hardware` | Pi 5 vendor kernel, firmware staging, U-Boot, initrd module closure fix. |
+| `nixosModules.hardware` | Pi 5 vendor kernel, firmware staging, U-Boot, EEPROM service, initrd module closure fix. |
 | `nixosModules.storage` | The NVMe btrfs layout. |
 | `nixosModules.impermanence` | Per-boot root reset, persisted paths, optional snapper. |
 | `nixosModules.installer` | The installer image role. Use `lib.mkPi5Installer` instead. |
 | `lib.mkPi5Installer` | Builds an installer `nixosConfiguration` from a few arguments. |
 | `packages.aarch64-linux.uboot-nvme` | The patched U-Boot 2026.10. |
+| `packages.aarch64-linux.raspberrypi-eeprom` | The backported `-2712` EEPROM tool and images used by `pi5.eeprom`. |
 
 The module wrappers close over this flake's `nixos-hardware`, `disko`, and
 `impermanence` inputs, so consumers do not pass `inputs` through `specialArgs`
@@ -97,6 +100,12 @@ flowchart LR
 - **NVMe-only boot: NVMe owns firmware, U-Boot, and `/boot`.** The SD card is
   only the installer medium. Remove it after installation; the EEPROM keeps the
   SD fallback so a reflashed installer still boots for recovery.
+- **The EEPROM is declarative, but it is board state.** `pi5.eeprom` renders
+  `[all]` plus the declared keys and applies them when they drift from the
+  running bootloader. The EEPROM survives reinstalls and is not rolled back with
+  a generation, and the installer is the only system that runs before the NVMe
+  can boot, so the installer image has to carry the same settings
+  (`lib.mkPi5Installer`'s `eeprom` argument).
 - **NVMe owns the system and persistent state.** `@root` is reset on every
   boot; `@persist` is the only state that survives. `@nix` and `@snapshots` are
   separate subvolumes.
@@ -210,6 +219,17 @@ discards instead of paying write amplification on every freed block.
 
   outputs = { self, nixpkgs, pi5, ... }:
   let
+    # One source of truth for the board's bootloader. The NVMe-only host gets
+    # these as stack defaults too, but the installer needs them explicitly: it
+    # is the only system that runs before the NVMe can boot.
+    eeprom = {
+      enable = true;
+      settings = {
+        BOOT_ORDER = "0xf416"; # NVMe -> SD -> USB -> restart
+        PCIE_PROBE = 1;        # non-HAT+ M.2 adapters; harmless otherwise
+      };
+    };
+
     # The boot medium is the choice, so it is the name.
     mkHost = bootModule: modules: nixpkgs.lib.nixosSystem {
       system = "aarch64-linux";
@@ -218,11 +238,15 @@ discards instead of paying write amplification on every freed block.
   in {
     nixosConfigurations = {
       rpi5-8gb = mkHost "sd-boot" [ ./hosts/rpi5-8gb.nix ];
-      rpi5-8gb-nvme = mkHost "nvme-boot" [ ./hosts/rpi5-8gb-nvme.nix ];
+      rpi5-8gb-nvme = mkHost "nvme-boot" [
+        { pi5.eeprom = eeprom; }
+        ./hosts/rpi5-8gb-nvme.nix
+      ];
 
       rpi5-bootstrap = pi5.lib.mkPi5Installer {
         hostName = "rpi5-bootstrap";
         sshAuthorizedKeys = [ "ssh-ed25519 AAAA... you@workstation" ];
+        eeprom = eeprom;
         extraModules = [ { system.stateVersion = "26.05"; } ];
       };
     };
@@ -244,16 +268,22 @@ A host module is the hostname, a state version, and your own access policy:
 }
 ```
 
-For a non-HAT+ M.2 adapter, add the PCIe setting and the EEPROM config from
-`eeprom/`:
+For a non-HAT+ M.2 adapter, add the PCIe device-tree setting and the EEPROM
+probe override to the host module:
 
 ```nix
 hardware.raspberry-pi.configtxt.settings.pi5.dtparam = [ "pciex1" ];
+pi5.eeprom.settings.PCIE_PROBE = 1;
 ```
 
+`nvme-boot` already defaults `PCIE_PROBE` to `1`; the setting matters for the
+installer, which needs the same `pi5.eeprom` options (see step 5).
+
 `mkPi5Installer` wires the installer module, Raspberry Pi 5 hardware support,
-and `system.stateVersion`. `extraModules` is where project-wide settings (SSH,
-Nix settings, state version overrides) belong.
+and `system.stateVersion`. `eeprom` forwards `pi5.eeprom` to the image: the
+installer is the only system that runs before the NVMe can boot, so the
+NVMe-only path needs it (step 5). `extraModules` is where project-wide settings
+(SSH, Nix settings, state version overrides) belong.
 
 ### 2. Build and flash the installer
 
@@ -311,21 +341,37 @@ ssh root@192.168.50.80 'sudo blkdiscard -f /dev/nvme0n1'
 ### 5. NVMe-only path (no SD card at runtime)
 
 For a host using `nixosModules.nvme-boot`, the flow is the same until the
-install, plus a one-time EEPROM change so the firmware tries NVMe first:
+install, plus the EEPROM configuration. The installed host gets
+`BOOT_ORDER=0xf416` and `PCIE_PROBE=1` as stack defaults, but the installer is
+the system that actually runs first, so it needs the same settings. That is what
+the `eeprom` argument above is for:
+
+```nix
+rpi5-bootstrap = pi5.lib.mkPi5Installer {
+  # ...
+  eeprom = {
+    enable = true;
+    settings = {
+      BOOT_ORDER = "0xf416"; # NVMe -> SD -> USB -> restart
+      PCIE_PROBE = 1;
+    };
+  };
+};
+```
+
+The installer applies them on its first boot, before `nixos-anywhere` connects.
+On a Pi 5 the update goes through flashrom immediately; the new boot order takes
+effect on the next power cycle.
 
 ```bash
-# BOOT_ORDER=0xf416 (NVMe -> SD -> USB -> restart) and PCIE_PROBE=1.
-scp eeprom/boot.conf root@<installer-ip>:/tmp/boot.conf
-ssh root@<installer-ip> 'sudo rpi-eeprom-config --apply /tmp/boot.conf'
-
 # The SD card is only the installer medium now.
 nixos-anywhere --flake .#rpi5-8gb-nvme --build-on auto --disko-mode disko \
   --target-host root@<installer-ip>
 ```
 
-If the target lacks `rpi-eeprom-config`, run the apply through
-`nix shell nixpkgs#raspberrypi-eeprom`. EEPROM changes take effect on the next
-power cycle.
+If you would rather not let the installer touch the EEPROM, apply the settings
+by hand from the booted installer and leave `eeprom.enable` off in the image;
+`eeprom/README.md` has the commands.
 
 Power off, remove the SD card, and power on. The firmware should report
 `Boot mode: NVME (06)`, then U-Boot boots `nvme#0...part_2` with extlinux. Keep
@@ -403,6 +449,32 @@ The flake's `nixosModules.boot-nvme` wrapper sets `ubootPackage` to
 `packages.aarch64-linux.uboot-nvme`; direct importers of `modules/boot/nvme.nix`
 must set it themselves. The package is built from the `nixpkgs-uboot` input and
 the patches in `pkgs/uboot-nvme/`.
+
+### `pi5.eeprom`
+
+| Option | Default | Notes |
+|--------|---------|-------|
+| `enable` | `false`; `true` in `nvme-boot` | Run the apply service at boot and when the settings change. |
+| `package` | `pkgs.raspberrypi-eeprom` | Also selects the bootloader version: `rpi-eeprom-config --apply` merges the settings into this package's newest image. |
+| `settings` | `{}`; `BOOT_ORDER=0xf416`, `PCIE_PROBE=1` in `nvme-boot` | `KEY=value` bootloader overrides, rendered under `[all]`. Booleans become `1`/`0`; integers decimal; strings verbatim. |
+
+`enable` is opt-in except in `nvme-boot`, where the NVMe-first boot order is
+what the stack means. The module is in `nixosModules.hardware`, so the installer
+has the same options; `lib.mkPi5Installer` forwards its `eeprom` argument to
+them.
+
+The service is a oneshot that calls `rpi-eeprom-config --apply` **only when a
+declared key differs** from the running configuration. Keys are compared
+case-insensitively, so `0xF416` does not re-flash on every boot. On BCM2712
+`rpi-eeprom-update` defaults to an immediate flashrom update, so the SPI EEPROM
+is written during activation rather than staged for the next boot; the new
+settings take effect on the next power cycle. A failed write leaves
+`recovery.bin` on `/boot/firmware`, which is the bootloader's own rollback path.
+
+The flake builds the `-2712` EEPROM release with the pinned nixpkgs recipe,
+because the main pin still ships `-2711`, which has no Pi 5 bootloader images.
+The package decides the bootloader version as well as the config, so bump the
+pin (or `pi5.eeprom.package`) deliberately.
 
 ### `pi5.impermanence`
 
@@ -482,6 +554,7 @@ initrd build fails on the first missing module.
 | Host does not boot after a bad activation | select the previous generation at the U-Boot/extlinux prompt on SD p2 or NVMe p2 | none |
 | NVMe-only host needs the installer | insert the reflashed SD; U-Boot scans MMC before NVMe | none |
 | NVMe-only host, installer SD lost | reflash a fresh installer SD and boot it | none |
+| EEPROM config invalid (`recovery.bin` loop or no boot) | bootloader-recovery SD card; see `eeprom/README.md` | none |
 
 No manual chroot or `switch-to-configuration boot` dance is needed on any of
 these: the boot medium's partitions are declared in disko, so the bootloader
@@ -519,9 +592,12 @@ out of disko's destroy stage as well.
    `rpi.env`. The core driver fix is not in U-Boot `master`/`next` as of
    2026-10-31. The patches and provenance are in `pkgs/uboot-nvme/README.md`;
    `packages.aarch64-linux.uboot-nvme` exposes the build.
-2. **The EEPROM is not declarative.** Set `BOOT_ORDER=0xf416` (NVMe → SD → USB →
-   restart) and `PCIE_PROBE=1` for non-HAT+ adapters with
-   `sudo rpi-eeprom-config --apply eeprom/boot.conf`.
+2. **The EEPROM is declarative, and the installer has to carry it.** The
+   installed `nvme-boot` host declares `BOOT_ORDER=0xf416` (NVMe → SD → USB →
+   restart) and `PCIE_PROBE=1` through `pi5.eeprom`, but it cannot boot the first
+   time to apply them. `lib.mkPi5Installer`'s `eeprom` argument puts the same
+   settings on the installer, which is the only system that runs before the NVMe
+   boots. Keep the two in sync; they are one let-binding in the consuming flake.
 3. **Partition priorities are load-bearing.** disko creates partitions in
    priority order. `firmware = 100`, `boot = 200`, `root = 9001`. Without the
    explicit priorities, `/boot` takes the first 2 GiB and the 8 MiB..264 MiB
@@ -543,6 +619,35 @@ out of disko's destroy stage as well.
    disabled the per-boot `@root` reset to isolate the boot-chain change. The root
    wipe only touches the btrfs partition, but re-enable it deliberately and
    verify that `/boot`, `/nix`, and `/persist` survive.
+
+### EEPROM mechanics
+
+`systemd.services.pi5-eeprom` runs `modules/eeprom-apply.sh` once per boot and
+again when the rendered config changes. The details that keep it safe:
+
+1. **Compare before flashing.** The script reads the running configuration with
+   `rpi-eeprom-config` and applies only when a declared key differs. Applying
+   unconditionally would write the SPI EEPROM on every boot. The comparison is
+   case-insensitive so a hexadecimal value that comes back in a different case
+   does not look like drift.
+2. **It writes the SPI EEPROM, not files for the next boot.** On BCM2712,
+   `rpi-eeprom-update` defaults to an immediate flashrom update, and the nixpkgs
+   package does not ship `rpi-eeprom-ab`, so the AB path is not used. The write
+   happens during activation; the new settings take effect on the next power
+   cycle.
+3. **The package selects the bootloader version too.** `rpi-eeprom-config
+   --apply` merges the config into the newest image in `pi5.eeprom.package`, so
+   changing the package pin also changes the bootloader. The main nixpkgs pin
+   ships the `-2711` release, which has no Pi 5 images, which is why the flake
+   backports `-2712`.
+4. **Settings are overrides, not a complete config.** A key removed from
+   `pi5.eeprom.settings` is left alone on the board; set the bootloader's default
+   value explicitly to revert it. The EEPROM is board state: it survives
+   reinstalls and is not undone by a rollback.
+5. **Failures are recoverable, but only with a recovery SD.** A power cut during
+   the flash leaves `recovery.bin` on `/boot/firmware`, which the bootloader
+   retries. An invalid image needs a bootloader-recovery SD card; a valid config
+   always falls back to SD.
 
 ### Root-wipe mechanics
 
@@ -633,6 +738,7 @@ those with an aarch64-linux builder:
 # from the consuming flake, which owns the real installer image:
 nix build .#images.<name>
 nix build .#checks.aarch64-linux.uboot-nvme
+nix build .#checks.aarch64-linux.eeprom
 ```
 
 `packages.aarch64-linux.uboot-nvme` exposes the patched U-Boot for manual
@@ -659,6 +765,11 @@ strings result/u-boot.bin | grep -E '^boot_targets=|preboot=|U-Boot 2026'
   the DMA-ranges parent walk and the `boot_targets`-removal follow-up).
   `strings` shows `preboot=pci enum; usb start; nvme scan;` and no
   `boot_targets=` line.
+- The EEPROM config is rendered and checked at evaluation time
+  (`checks.aarch64-linux.eeprom`), and `modules/eeprom-apply.sh` is
+  shellchecked. The flashrom path and the `-2712` package backport have **not**
+  been run on hardware from this module; the 2026-10-30 bring-up applied the
+  same settings by hand.
 - The SD-boot design and the individual mechanics were verified on real hardware
   in the source project: vendor kernel boot with RP1 (USB + Ethernet) alive,
   NVMe enumerated on PCIe, the full impermanence mount tree, the root-wipe
