@@ -12,6 +12,37 @@ NVMe and carries a patched U-Boot until the fixes land upstream.
 The build, flash, and install steps are plain `nix build`, `dd`, and
 `nixos-anywhere` invocations; the quick start lists them verbatim.
 
+## How this design got here
+
+The goal was NixOS on a Pi 5. The root moved from SD to NVMe, and the boot and
+storage layers changed several times. This is the short version, including the
+branches that were built or researched and then abandoned.
+
+| When started | Repo | Basic pattern | Outcome |
+|------|------|---------------|---------|
+| 2024-07 – 2026-10 | `cfg` (`adama`, `starbuck`) | `raspberry-pi-nix` + custom `hardware-rpi5`; firmware boots the kernel directly (`uboot.enable = false`); SD image built with `sdImage`, root on `NIXOS_SD` ext4; NVMe/PCIe enabled in `config.txt` but root stayed on SD; no disko | **Used** — adama and starbuck started from SD under `cfg`. |
+| 2025-09 | `homelab` (scratch) | `nixos-raspberrypi` demo host on the stock SD image; no custom disk layout | **Never deployed** — scratch starter; no Pi deployment recorded. |
+| 2025-10 – 11 | `hamam`, `ro`, `kfg` | `nixos-raspberrypi` + disko NVMe (FIRMWARE + ESP + ZFS), ZFS root, 4K `linuxPackages_rpi4`; `nixos-anywhere` | **Used** — starbuck is reinstalled to NVMe+ZFS; `ro` and `kfg` re-express the same stack. |
+| 2026-01 | `ai`, `how` | `nixos-raspberrypi` baseline; `ai` ADRs propose NVMe/ZFS/tmpfs+impermanence, `how` is a Den scaffold with tmpfs/ZFS and a `CHANGE-ME` disk | **Never used** — proposals/scaffolds only; no deployment. |
+| 2026-03 – 04 | `konfig` (`starbuck`) | Same `nixos-raspberrypi` + disko NVMe/ZFS layout, then tmpfs `/` + ZFS `/persist` with impermanence; 4K `linuxPackages_rpi4` | **Used** — starbuck adds tmpfs `/` + ZFS `/persist` with impermanence. |
+| 2026-04 | `lab` (`pi-01`, `pi-02`) | `nixos-raspberrypi` + disko NVMe (firmware + ext4 root), 4K kernel, systemd-nspawn; `nixos-anywhere` | **Used** — pi-01 deployed; a simpler ext4 alternative to the ZFS line. |
+| 2026-07 | `nix-config` (`starbuck`) | The same `nixos-raspberrypi` + ZFS + tmpfs/impermanence stack moved into the new fleet repo | **Used** — carried forward, no new boot design. |
+| 2026-10-08 – 09 | `nix-homelab-hosts` | Drop `nixos-raspberrypi`: `nixos-hardware` Pi 5 with the vendor `linux-rpi`; SD owns firmware + U-Boot + extlinux `/boot`; NVMe btrfs root with `@root`, `@nix`, `@persist`, `@snapshots`; disko; installer variant skips kexec | **Used** — the SD-boot stack this repo extracts. |
+| 2026-10-09 | `nix-homelab-hosts` | Three-partition SD: firmware + persistent rescue OS + `/boot` | **Built, never used for recovery** — every real incident still ended in a reflash; dropped for the stock two-partition SD. |
+| 2026-10-09 | `nix-homelab-hosts` | Mainline `linuxPackages_latest` with vendor firmware DTBs | **Used briefly, then dropped** — `rp1_driver -22` killed USB and Ethernet; vendor `linux-rpi` since. |
+| 2026-10 | `nix-config` wiki, `rpi5-bootloader` research | UEFI/EDK2 firmware + systemd-boot | **Never used** — researched only; U-Boot + extlinux stayed the path. |
+| 2026-10 | `nix-homelab-hosts`, extraction | `nixos-anywhere` with kexec; USB, network, or HTTP boot | **Never used** — Pi 5 kexec is flaky, so the installer variant skips it; alternative boot media were documented only. |
+| 2026-10 | `nix-homelab-hosts` | Stock U-Boot 2026.07 for NVMe boot | **Never used** — it lacks NVMe config and the address-translation fix; patched U-Boot 2026.10 was required. |
+| 2026-10-24 | `nix-homelab` (rewrite) | Same SD boot + NVMe btrfs, but a persistent root and no impermanence; bootstrap with `--disko-mode mount` | **Used** — the simplified host/workload rewrite. |
+| 2026-10-25 | `nixos-raspberry-pi-5` | SD-boot extracted as reusable modules; `pi5-image` flash/install CLI; installer image exported | **Used** — the CLI and demo image were later deleted; modules only. |
+| 2026-10-30 | `rpi5-bootloader` → `nixos-raspberry-pi-5` | NVMe-only: EEPROM `0xf416`, firmware + patched U-Boot 2026.10 + extlinux `/boot` + btrfs root all on NVMe; SD is installer/recovery only | **Used on 4 GB; 8 GB not migrated.** |
+
+The two stacks in this repo are the survivors of that list: `sd-boot` is the
+2026-10-08 design, and `nvme-boot` is the 2026-10-30 design. `Used` means the
+pattern booted on hardware at least once; several of those were later replaced
+(`raspberry-pi-nix` by `nixos-raspberrypi` and then `nixos-hardware`, ZFS by
+btrfs, and the tmpfs root by a btrfs subvolume reset).
+
 ## The tree
 
 | Path | What it is |
