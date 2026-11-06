@@ -14,7 +14,8 @@ concurrency:
 
 jobs:
   darwin:
-    runs-on: macos-14
+    # macos-14 was retired on 2026-11-02; macos-15 is the current arm64 image.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
